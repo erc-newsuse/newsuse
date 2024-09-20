@@ -1,0 +1,20 @@
+{
+    "_checkout": null,
+    "_output_dir": "/home/newsuse/python",
+    "_repo_dir": "cookiecutters/package/",
+    "_template": "cookiecutters/package/",
+    "author": "Szymon Talaga",
+    "copyright_year": "2024",
+    "description": "Namespace package of the NEWSUSE project.",
+    "development_status": "Development Status :: 4 - Beta",
+    "email": "stalaga@uw.edu.pl",
+    "friendly_name": "NEWSUSE",
+    "full_project_name": "newsuse",
+    "github_owner": "newsuse",
+    "github_repo": "newsuse",
+    "license": "MIT",
+    "namespace": "newsuse",
+    "package_name": "newsuse",
+    "project_name": "newsuse",
+    "template_version": "0.1"
+}
