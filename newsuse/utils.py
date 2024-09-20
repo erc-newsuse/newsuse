@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+from typing import Any
 
 from newsuse.types import PathLike
 
@@ -30,10 +32,29 @@ class ProjectPaths:
     ('project', 'config.py')
     >>> paths.root == temp
     True
+
+    It is possible to set additional paths,
+    which are automatically converted to :class:`pathlib.Path` instances.
+    Non-absolute paths are interpreted relative to the root
+
+    >>> paths.custom = "script.py"
+    >>> paths.custom.parts == (*temp.parts, "script.py")
+    True
     """
 
     def __init__(self, config: PathLike) -> None:
-        self.config = Path(config)
+        self._config = Path(config).absolute()
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if isinstance(value, str | os.PathLike):
+            value = Path(value)
+            if not value.root:
+                value = self.root / value
+        super().__setattr__(name, value)
+
+    @property
+    def config(self) -> Path:
+        return self._config
 
     @property
     def root(self) -> Path:

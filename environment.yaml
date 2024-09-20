@@ -1,4 +1,4 @@
-name: newsuse-dev
+name: newsuse
 channels:
   - conda-forge
   - pytorch
