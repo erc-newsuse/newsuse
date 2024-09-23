@@ -25,6 +25,9 @@ dependencies = [
     "transformers>=4.44",
     "datasets>=2.21",
     "tqdm>=4.66",
+    "pydantic>=2.9",
+    "confection>=0.1",
+    "catalogue>=2.0",
 ]
 dynamic = ["version"]
 classifiers = [
