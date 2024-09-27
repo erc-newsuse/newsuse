@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from newsuse.types import Namespace, PathLike
 
@@ -32,6 +32,12 @@ class Paths(Namespace):
     >>> paths.datasets = "/datasets"
     >>> paths.datasets == Path("/datasets")
     True
+
+    Paths can also be made relative to other paths using '@' prefix.
+
+    >>> paths = Paths(temp, data="data", proc="@data/proc")
+    >>> paths.proc == Path(temp) / "data" / "proc"
+    True
     """
 
     def __init__(self, root: PathLike | None = None, *args: Any, **kwargs: Any) -> None:
@@ -51,6 +57,42 @@ class Paths(Namespace):
         if name.startswith("__") and name.endswith("__"):
             return obj
         path = Path(obj)
-        if not path.root:
+        if (anchor := path.parts[0]).startswith("@"):
+            path = self[anchor[1:]] / Path(*path.parts[1:])
+        elif not path.root:
             path = self.root / path
         return path
+
+    @classmethod
+    def from_config(cls, config: PathLike, *args: Any, **kwargs: Any) -> Self:
+        """Construct from a config file assuming that ``root`` is its parent directory.
+
+        Examples
+        --------
+        >>> from tempfile import mkdtemp
+        >>> temp = Path(mkdtemp())
+        >>> config = temp/"config.ini"
+        >>> paths = Paths.from_config(temp/config)
+        >>> paths.root == temp
+        True
+        >>> paths.config == config
+        True
+        """
+        config = Path(config)
+        return cls(config.parent, *args, config=config.name, **kwargs)
+
+    def __copy__(self, **kwargs: PathLike) -> Self:
+        """Make a copy with additional paths given by ``**kwargs``.
+
+        Examples
+        --------
+        >>> from tempfile import mkdtemp
+        >>> temp = Path(mkdtemp())
+        >>> paths = Paths(temp, data="data")
+        >>> new_paths = paths.__copy__(proc="@data/proc")
+        >>> new_paths.proc == paths.data / "proc"
+        True
+        """
+        dct = dict(self.__dict__)
+        root = dct.pop("root")
+        return self.__class__(root, **dct, **kwargs)

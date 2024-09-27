@@ -2,6 +2,8 @@ import os
 from types import SimpleNamespace
 from typing import Any
 
+from newsuse.dotpath import dotdel, dotget, dotset
+
 PathLike = str | os.PathLike
 
 
@@ -18,10 +20,18 @@ class Namespace(SimpleNamespace):
     """
 
     def __getitem__(self, name: str) -> Any:
+        if "." in name:
+            return dotget(self, name)
         return getattr(self, name)
 
     def __setitem__(self, name: str, value: Any) -> None:
-        setattr(self, name, value)
+        if "." in name:
+            dotset(self, name, value)
+        else:
+            setattr(self, name, value)
 
     def __delitem__(self, name: str) -> None:
-        delattr(self, name)
+        if "." in name:
+            dotdel(self, name)
+        else:
+            delattr(self, name)
