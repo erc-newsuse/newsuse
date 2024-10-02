@@ -4,14 +4,18 @@ from shutil import rmtree
 from typing import Any, Self
 
 import datasets
+import pandas as pd
+import torch
+import torch.utils
 from datasets import load_from_disk
 from datasets.features import Features
+from transformers.pipelines.pt_utils import KeyDataset as _KeyDataset
 
 from newsuse.annotations import Annotations
 from newsuse.types import PathLike
 from newsuse.utils import inthash
 
-__all__ = ("Dataset", "DatasetDict")
+__all__ = ("Dataset", "DatasetDict", "PandasDataset", "KeyDataset")
 
 
 class DatasetDict(datasets.DatasetDict):
@@ -103,3 +107,44 @@ class Dataset(datasets.Dataset):
     def select_columns(self, *args: Any, **kwargs: Any) -> Self:
         dataset = super().select_columns(*args, **kwargs)
         return self.from_dataset(dataset)
+
+
+class PandasDataset(torch.utils.data.Dataset):
+    """:mod:`torch` dataset based on :class:`pandas.DataFrame`.
+
+    Examples
+    --------
+    >>> df = pd.DataFrame({"a": [1,2,3], "b": [1,2,3]})
+    >>> dataset = PandasDataset(df)
+    >>> dataset[0]
+    {'a': 1, 'b': 1}
+    >>> dataset[:2]
+    {'a': [1, 2], 'b': [1, 2]}
+
+    It is compatible with :class:`newsuse.ml.KeyDaset`.
+
+    >>> keyed = KeyDataset(dataset, "a")
+    >>> keyed[0]
+    1
+    >>> keyed[:2]
+    [1, 2]
+    """
+
+    def __init__(self, df: pd.DataFrame) -> None:
+        self.df = df
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        out = self.df.iloc[idx]
+        if isinstance(idx, slice):
+            return out.to_dict(orient="list")
+        return out.to_dict()
+
+
+class KeyDataset(_KeyDataset):
+    def __init__(self, dataset: torch.utils.data.Dataset | pd.DataFrame, key: str) -> None:
+        if isinstance(dataset, pd.DataFrame):
+            dataset = PandasDataset(dataset)
+        super().__init__(dataset, key)

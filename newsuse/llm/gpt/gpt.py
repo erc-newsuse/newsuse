@@ -9,7 +9,7 @@ from openai.resources.beta.chat.completions import Completions
 from openai.types.chat import ChatCompletion
 from pydantic import BaseModel
 
-from newsuse.config import Config
+from newsuse.config import Config, RootConfig
 from newsuse.types import PathLike
 
 __all__ = ("ChatGpt",)
@@ -31,7 +31,7 @@ class ChatGpt:
         self.response_format = response_format
         self.params = params
         self.client = client or OpenAI()
-        self.pricing = pricing or Config()["openai.pricing"]
+        self.pricing = pricing or RootConfig().openai.pricing
         self._meta = {"model": self.model}
         self._usage = []
 
@@ -111,6 +111,6 @@ class ChatGpt:
             fh.write(json.dumps(meta).strip() + "\n")
 
     def calculate_cost(self, input_tokens: int, output_tokens: int) -> float:
-        prices = self.pricing[f"{self.model}.standard"]
+        prices = self.pricing[self.model]["standard"]
         cost = (input_tokens * prices["input"] + output_tokens * prices["output"]) / 1e6
         return cost

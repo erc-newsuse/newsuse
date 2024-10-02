@@ -1,8 +1,12 @@
+import io
 from collections.abc import Hashable, Sequence
+from functools import singledispatchmethod
 from typing import Any, Self
 
 import numpy as np
 import pandas as pd
+from pydrive2.drive import GoogleDrive
+from pydrive2.files import GoogleDriveFile
 
 from newsuse.config import Config
 from newsuse.data import DataFrame
@@ -35,10 +39,11 @@ class Annotations:
         self,
         config: Config,
         ann: pd.DataFrame | None = None,
+        sampler: np.random.Generator | None = None,
     ) -> None:
         self.ann = ann
         self.config = Config(self.default_config.merge(config))
-        self.source = None
+        self._sampler = sampler
 
     @property
     def annotator_cols(self) -> list[str]:
@@ -46,7 +51,16 @@ class Annotations:
 
     @property
     def sampler(self) -> np.random.Generator:
-        seed = inthash(self.ann["key"].to_numpy(), self.config.sampling_salt)
+        if self._sampler is None:
+            self._sampler = self.get_sampler()
+        return self._sampler
+
+    def get_sampler(self, df: pd.DataFrame | None = None) -> np.random.Generator:
+        if df is None:
+            df = self.ann
+        data = df["key"].to_numpy()
+        data.sort()
+        seed = inthash(data) + self.config.seed
         return np.random.default_rng(seed)
 
     def get_key(self, ann: pd.DataFrame) -> str:
@@ -54,10 +68,7 @@ class Annotations:
             return key
         return ann.columns[0]
 
-    def read(self, source: PathLike, **kwargs: Any) -> Self:
-        """Read annotations' data from ``self.source``."""
-        sheets = DataFrame.from_excel(source, sheet_name=None, **kwargs)
-
+    def _process_after_read(self, sheets: dict[str, pd.DataFrame]) -> DataFrame:
         if self.config.sheet_index_name:
             ann = pd.concat(
                 sheets, axis=0, ignore_index=False, names=[self.config.sheet_index_name]
@@ -80,9 +91,30 @@ class Annotations:
             ann[acol] = self.sanitize_labels(ann[acol])
         ann = self.order_cols(ann).rename(columns={key: "key"})
         ann = ann.convert_dtypes(dtype_backend=self.config.dtype_backend)
-        self.ann = DataFrame(ann)
-        self.source = source
+        return DataFrame(ann)
+
+    @singledispatchmethod
+    def read(self, source, **kwargs: Any) -> Self:
+        """Read annotations' data from ``source``."""
+        sheets = DataFrame.from_excel(source, sheet_name=None, **kwargs)
+        self.ann = self._process_after_read(sheets, **kwargs)
         return self
+
+    @read.register
+    def _(self, source: GoogleDriveFile, **kwargs: Any) -> Self:
+        if not source.metadata:
+            source.FetchMetadata()
+        if (ext := source["fileExtension"]) != "xlsx":
+            errmsg = f"cannot read annotations in '.{ext}' format"
+            raise ValueError(errmsg)
+        sheets = DataFrame.from_gdrive_file(source, sheet_name=None, **kwargs)
+        self.ann = self._process_after_read(sheets, **kwargs)
+        return self
+
+    @read.register
+    def _(self, source: GoogleDrive, id: str, **kwargs: Any) -> Self:
+        file = source.CreateFile({"id": id})
+        return self.read(file, **kwargs)
 
     def order_cols(self, ann: pd.DataFrame) -> pd.DataFrame:
         acols = self.annotator_cols
@@ -113,25 +145,26 @@ class Annotations:
         5    POLITICAL
         dtype: string
         """
-        remap = {rf"^{i}(\.0+)?$": label for i, label in enumerate(self.config.labels)}
-        acol = (
-            acol.astype(pd.StringDtype("pyarrow"))
-            .replace(remap, regex=True)
-            .astype(pd.StringDtype(self.config.dtype_backend))
-        )
+        acol = acol.astype(pd.StringDtype("pyarrow"))
+        mask = acol.notnull()
+        remap = {rf"^{i}(\.0+)?\b": label for i, label in enumerate(self.config.labels)}
+        acol[mask] = acol[mask].str.strip().replace(remap, regex=True).str.strip()
+        acol = acol.astype(pd.StringDtype(self.config.dtype_backend))
+        use = acol.isnull()
+        for label in self.config.labels:
+            use |= acol.str.startswith(label)
+        acol[~use] = pd.NA
         return acol
 
-    def sample_from(
+    def _sample_from(
         self,
         data: pd.DataFrame,
         n: int,
         *,
         groups: str | Sequence[str] = (),
-        sampler: np.random.Generator | None = None,
         weights: Hashable | None = None,
     ) -> DataFrame:
         ignore = self.ann["key"].to_numpy()
-        sampler = sampler or self.sampler
         sheet_name = self.config.sheet_index_name
         if groups and isinstance(groups, str):
             groups = [groups]
@@ -146,7 +179,7 @@ class Annotations:
             data = data.groupby(groups)  # type: ignore
 
         sample = data.sample(
-            n=n, replace=False, weights=weights, random_state=sampler
+            n=n, replace=False, weights=weights, random_state=self.sampler
         ).reset_index(drop=True)
         sample.insert(0, "key", sample.pop(key))
 
@@ -155,22 +188,14 @@ class Annotations:
             usecols.append(sheet_name)
 
         sample = sample[usecols]
-        if groups:
-            sample = sample.sample(
-                frac=1, replace=False, ignore_index=True, random_state=sampler
-            )
-
         return DataFrame(sample)
 
     def append_from(
         self,
         data: pd.DataFrame,
         n: int = 0,
-        *,
-        annotations: PathLike | None = None,
-        datasource: PathLike | None = None,
         **kwargs: Any,
-    ) -> DataFrame:
+    ) -> Self:
         """Append records sample from ``path``.
 
         Parameters
@@ -185,23 +210,50 @@ class Annotations:
         """
         if n > 0:
             msg = f"Adding {n} samples per group"
-            if datasource:
-                msg += f" from {datasource!s}"
-            if annotations:
-                msg += f" to {annotations!s}"
-            print(msg)
-            sample = self.sample_from(data, n, **kwargs)
+            sample = self._sample_from(data, n, **kwargs)
             self.ann = DataFrame(pd.concat([self.ann, sample], axis=0, ignore_index=True))
         else:
             msg = "Adding no new samples"
-            if annotations:
-                msg += f" to {annotations!s}"
             print(msg)
-        return self.ann
+        return self
 
+    def shuffle_empty(self, *, groups: Hashable | Sequence[Hashable] | None = None) -> Self:
+        """Shuffle examples without annotations, possibly in ``groups``."""
+        acols = self.annotator_cols
+
+        msg = "Shuffling non-annotated examples"
+        if groups is not None:
+            if isinstance(groups, str):
+                groups = [groups]
+            msg += f" by {', '.join(f"'{g}'" for g in groups)}"
+        print(msg)
+
+        def shuffle(df: pd.DataFrame) -> pd.DataFrame:
+            df = df.sort_values(by="key")
+            has_annotations = df[acols].notnull().any(axis=1)
+            filled = df[has_annotations]
+            empty = df[~has_annotations]
+            sampler = self.get_sampler(filled)
+            empty_shuffled = empty.sample(
+                frac=1,
+                replace=False,
+                random_state=sampler,
+                ignore_index=True,
+            )
+            return pd.concat([filled, empty_shuffled], axis=0, ignore_index=True)
+
+        if groups is None:
+            self.ann = shuffle(self.ann)
+        else:
+            self.ann = self.ann.groupby(groups).apply(shuffle)
+        self.ann.reset_index(drop=True, inplace=True)
+
+        return self
+
+    @singledispatchmethod
     def write(
         self,
-        path: PathLike,
+        target,
         *,
         col_width: float = 20,
         textcol_width: float = 750,
@@ -226,13 +278,26 @@ class Annotations:
             sheet.autofilter(0, 0, max_row, max_col)
             sheet.freeze_panes(1, 0)
 
-        with pd.ExcelWriter(path, engine=engine) as writer:
+        with pd.ExcelWriter(target, engine=engine) as writer:
             if index_name := self.config.sheet_index_name:
                 for key, df in self.ann.groupby([index_name]):
                     sheet_name, *_ = key
                     do_write(df, writer, sheet_name=sheet_name, index_name=index_name)
             else:
                 do_write(self.ann, writer, index_name=index_name)
+
+    @write.register
+    def _(self, target: GoogleDriveFile, **kwargs: Any) -> None:
+        DataFrame.check_gdrive_file(target)
+        buffer = io.BytesIO()
+        self.write(buffer, **kwargs)
+        target.content = buffer
+        target.Upload()
+
+    @write.register
+    def _(self, target: GoogleDrive, id: str, **kwargs: Any) -> None:
+        file = target.CreateFile({"id": id})
+        self.write(file, **kwargs)
 
     def with_labels(
         self,
@@ -277,3 +342,14 @@ class Annotations:
             ann["label"] = ann["label"].combine_first(ann[label])
 
         return ann
+
+    def update_columns(self, data: pd.DataFrame, *columns: str) -> Self:
+        """Update values in ``*columns`` using new ``data``."""
+        key = self.get_key(data)
+        remap = {key: "key", **{c: f"{c}_new" for c in columns}}
+        data = data[list(remap)].rename(columns=remap)
+        ann = self.ann.merge(data, how="left", on="key")
+        for col in columns:
+            ann[col] = ann.pop(f"{col}_new").combine_first(ann.pop(col))
+        self.ann = ann
+        return self

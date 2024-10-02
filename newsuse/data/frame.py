@@ -1,8 +1,15 @@
-from collections.abc import Callable, Mapping
+import io
+import re
+from collections.abc import Callable, Iterator, Mapping
+from functools import singledispatchmethod
 from pathlib import Path
 from typing import Any, Literal, Self
 
 import pandas as pd
+from pydrive2.drive import GoogleDrive
+from pydrive2.files import GoogleDriveFile
+from pyreadr import read_r
+from tqdm.auto import tqdm
 
 from newsuse.types import PathLike
 
@@ -86,7 +93,15 @@ class DataFrame(pd.DataFrame):
         errmsg = f"cannot interpret '{source}' source"
         raise ValueError(errmsg)
 
-    def to_(self, target: Any, *args: Any, **kwargs: Any) -> None:
+    def _get_writer(self, ext: str) -> Callable[[Self, ...], None]:
+        try:
+            return getattr(self, f"to_{ext}")
+        except AttributeError as exc:
+            errmsg = f"'{ext}' data sources are not supported"
+            raise AttributeError(errmsg) from exc
+
+    @singledispatchmethod
+    def to_(self, target, *args: Any, **kwargs: Any) -> None:
         """Guess desired storage type and try to write data to it.
 
         Parameters
@@ -117,12 +132,8 @@ class DataFrame(pd.DataFrame):
         >>> bool(DataFrame.from_(path).eq(df).all().all())
         True
         """
-        stype = self.guess_storage_type(target)
-        try:
-            writer: Callable[..., None] = getattr(self, f"to_{stype}")
-        except AttributeError as exc:
-            errmsg = f"'{stype}' data storage is not supported"
-            raise AttributeError(errmsg) from exc
+        ext = self.guess_storage_type(target)
+        writer = self._get_writer(ext)
         return writer(target, *args, **kwargs)
 
     def to_jsonl(self, *args: Any, orient: str = "records", **kwargs: Any) -> None:
@@ -288,11 +299,58 @@ class DataFrame(pd.DataFrame):
         """
         self.to_excel(*args, **kwargs)
 
+    def to_gdrive_file(self, target: GoogleDriveFile, *args: Any, **kwargs: Any) -> None:
+        """Write to a :class:`pydrive2.files.GoogleDriveFile`.
+
+        The file must define proper MIME type and file extension.
+        """
+        self.check_gdrive_file(target)
+        ext = str(target["ext"]).removeprefix(".")
+        writer = self._get_writer(f".{ext}")
+        buffer = io.BytesIO()
+        writer(buffer, *args, **kwargs)
+        target.content = buffer
+        target.Upload()
+
+    def to_gdrive(self, target: GoogleDrive, id: str, *args: Any, **kwargs: Any) -> None:
+        """Write to :class:`pydrive2.drives.GoogleDrive` file by ``id``."""
+        file = target.CreateFile({"id": id})
+        self.to_gdrive(file, *args, **kwargs)
+
+    @staticmethod
+    def check_gdrive_file(target: GoogleDriveFile) -> None:
+        """Check if a :class:`pydrive2.files.GoogleDriveFile` defines MIME and extension."""
+        if not target.metadata:
+            target.FetchMetadata()
+        if not target.get("mimeType"):
+            errmsg = "'target' file must define MIME type"
+            raise ValueError(errmsg)
+        if not target.get("fileExtension"):
+            errmsg = "'target' file must define file extension"
+            raise ValueError(errmsg)
+
+    @to_.register
+    def _(self, target: GoogleDriveFile, *args: Any, **kwargs: Any) -> None:
+        self.to_gdrive_file(target, *args, **kwargs)
+
+    @to_.register
+    def _(self, target: GoogleDrive, *args: Any, **kwargs: Any) -> None:
+        self.to_gdrive(target, *args, **kwargs)
+
+    @classmethod
+    def _get_reader(cls, ext: str) -> Callable[..., Self]:
+        try:
+            return getattr(cls, f"from_{ext}")
+        except AttributeError as exc:
+            errmsg = f"'{ext}' data sources are not supported"
+            raise AttributeError(errmsg) from exc
+
+    @singledispatchmethod
     @classmethod
     def from_(cls, source: Any, *args: Any, **kwargs: Any) -> Self:
         """Guess storage type and try to use it to construct a data frame.
 
-        Currently only path-like sources are supported.
+        Currently only path-like sources and :class:`GoogleDriveFile`s are supported.
 
         Parameters
         ----------
@@ -327,13 +385,19 @@ class DataFrame(pd.DataFrame):
         Traceback (most recent call last):
         AttributeError: ...
         """
-        stype = cls.guess_storage_type(source)
-        try:
-            reader: Callable[..., Self] = getattr(cls, f"from_{stype}")
-        except AttributeError as exc:
-            errmsg = f"'{stype}' data sources are not supported"
-            raise AttributeError(errmsg) from exc
+        ext = cls.guess_storage_type(source)
+        reader = cls._get_reader(ext)
         return reader(source, *args, **kwargs)
+
+    @from_.register
+    @classmethod
+    def _(cls, source: GoogleDriveFile, *args: Any, **kwargs: Any) -> Self:
+        return cls.from_gdrive_file(source, *args, **kwargs)
+
+    @from_.register
+    @classmethod
+    def _(cls, source: GoogleDrive, *args: Any, **kwargs: Any) -> Self:
+        return cls.from_gdrive(source, *args, **kwargs)
 
     @classmethod
     def from_csv(cls, *args: Any, **kwargs: Any) -> Self:
@@ -466,3 +530,96 @@ class DataFrame(pd.DataFrame):
     def from_xlsx(cls, *args: Any, **kwargs: Any) -> Self:
         """See :meth:`from_excel`."""
         return cls.from_excel(*args, **kwargs)
+
+    @classmethod
+    def from_rds(cls, *args: Any, **kwargs: Any) -> Self:
+        """Read from ``.rds`` files using :mod:`pyreadr`.
+
+        See :func:`pyreadr.read_r` for details.
+        """
+        return cls(read_r(*args, **kwargs)[None]).convert_dtypes()
+
+    @classmethod
+    def read_many(
+        cls,
+        *paths: PathLike,
+        key: str | None = None,
+        drop_before_key: bool = False,
+        read_opts: Mapping[str, Any] | None = None,
+        progress: Mapping[str, Any] | bool = False,
+        re_flags: int = 0,
+        re_ignorecase: bool = False,
+        **meta: str,
+    ) -> Iterator[Self]:
+        """Iterate over and read multiple data files.
+
+        Parameters
+        ----------
+        path
+            Path to file(s).
+            Multiple source files can be specified using GLOB patterns.
+        key
+            Name of the key column.
+        progress
+            Should the iterator be wrapped in progress bar.
+            Can be passed as bool or as a mapping with :func:`tqdm.tqdm` options.
+        drop_before_key
+            Should columns before the key column be dropped after reading.
+        re_flags, re_ignorecase
+            Options passed to :func:`re.compile`
+            used for extracting metadata from file names.
+        **meta
+            Names to regex pairings used for adding metadata columns to data frames.
+            Regular expression must Capture the metadata value in the first match group.
+        """
+        read_opts = read_opts or {}
+        if re_ignorecase:
+            re_flags |= re.IGNORECASE
+        meta_rx = {name: re.compile(pattern, re_flags) for name, pattern in meta.items()}
+
+        files = []
+        for path in map(Path, paths):
+            for file in path.parent.glob(path.name):
+                files.append(file)  # noqa
+
+        def _iter():
+            for file in files:
+                df = DataFrame.from_(file, **read_opts)
+                if key:
+                    if drop_before_key:
+                        df = df.loc[:, key:]
+                    df.insert(0, key, df.pop(key))
+                meta_pos = 1 if key else 0
+                for name, rx in reversed(meta_rx.items()):
+                    value = rx.match(file.name).group(1)
+                    df.insert(meta_pos, name, value)
+                df = cls(df).convert_dtypes()
+                yield df
+
+        if progress:
+            tqdm_kwargs = {} if isinstance(progress, bool) else progress
+            yield from tqdm(_iter(), **{"total": len(files), **tqdm_kwargs})
+        else:
+            yield from _iter()
+
+    @classmethod
+    def from_gdrive_file(cls, source: GoogleDriveFile, *args: Any, **kwargs: Any) -> Self:
+        """Construct from :class:`GoogleDriveFile` instance.
+
+        ``*args`` and ``**kwargs`` are passed to an appropriate format reader.
+        """
+        if not source.metadata:
+            source.FetchMetadata()
+        reader = cls._get_reader(source["fileExtension"])
+        buffer = io.BytesIO(source.GetContentIOBuffer().read())
+        return reader(buffer, *args, **kwargs)
+
+    @classmethod
+    def from_gdrive(cls, source: GoogleDrive, id: str, *args: Any, **kwargs: Any) -> Self:
+        """Construct from :class:`GoogleDrive`.
+
+        ``id`` is the Google Drive file id.
+        ``*args`` and ``*kwargs`` are passed to an appropriate format reader.
+        """
+        file = source.CreateFile({"id": id})
+        return cls.from_gdrive_file(file, *args, **kwargs)

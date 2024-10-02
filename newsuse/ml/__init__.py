@@ -7,7 +7,7 @@ from transformers import (
     TrainingArguments,
 )
 
-from .datasets import Dataset, DatasetDict
+from .datasets import Dataset, DatasetDict, KeyDataset, PandasDataset
 from .models import AutoModelForSequenceClassification
 from .performance import Performance
 from .pipelines import TextClassificationPipeline, pipeline

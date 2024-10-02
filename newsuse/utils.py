@@ -9,7 +9,7 @@ import pydantic
 __all__ = ("inthash", "get_signature", "match_signature", "validate_call")
 
 
-def inthash(x: Any, shift: int = 0, **kwargs: Any) -> int:
+def inthash(x: Any, **kwargs: Any) -> int:
     """Make deterministic integer hash from an object and add ``shift``.
 
     ``**kwargs`` are passed to :func:`joblib.hash`.
@@ -19,10 +19,10 @@ def inthash(x: Any, shift: int = 0, **kwargs: Any) -> int:
     >>> tup = (1, 2)
     >>> inthash(tup) == inthash(tup)
     True
-    >>> inthash(tup) == inthash(tup, 2)
+    >>> inthash(tup) == inthash(tup) + 2
     False
     """
-    return int(joblib.hash(x, **kwargs), base=16) + shift
+    return int(joblib.hash(x, **kwargs), base=16)
 
 
 @singledispatch

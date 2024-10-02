@@ -1,14 +1,13 @@
-from collections.abc import Iterator, Mapping
-from functools import singledispatchmethod, wraps
+from collections.abc import Mapping
+from functools import wraps
 from typing import Any
 
-import pandas as pd
 import torch
 import transformers
-from datasets import Dataset
 from tqdm.auto import tqdm
 from transformers.pipelines import PIPELINE_REGISTRY
-from transformers.pipelines.pt_utils import KeyDataset
+
+from newsuse.ml import KeyDataset
 
 __all__ = (
     "pipeline",
@@ -36,19 +35,14 @@ class TextClassificationPipeline(transformers.TextClassificationPipeline):
     transformers.pipelines.TextClassificationPipeline : Parent pipeline class.
     """
 
-    @singledispatchmethod
-    def __call__(self, inputs, **kwargs: Any) -> _OutputT | list[_OutputT]:
-        return super().__call__(inputs, **kwargs)
-
-    @__call__.register
-    def _(
+    def __call__(
         self,
-        inputs: Dataset,
-        field: str = "text",
+        inputs,
+        key: str | None = None,
         *,
-        progress: bool | dict[str, Any] = False,
+        progress: bool | Mapping[str, Any] = False,
         **kwargs: Any,
-    ) -> Iterator[_OutputT]:
+    ) -> _OutputT | list[_OutputT]:
         if isinstance(progress, bool):
             tqdm_kwargs = {"disable": not progress}
         else:
@@ -57,18 +51,10 @@ class TextClassificationPipeline(transformers.TextClassificationPipeline):
             tqdm_kwargs["total"] = len(inputs)
         except TypeError:
             pass
-        dataset = KeyDataset(inputs, field)
-        yield from tqdm(self(dataset, **kwargs), **tqdm_kwargs)
-
-    @__call__.register
-    def _(
-        self,
-        inputs: pd.DataFrame,
-        field: str = "text",
-        **kwargs: Any,
-    ) -> Iterator[_OutputT]:
-        dataset = Dataset.from_pandas(inputs[[field]])
-        yield from self(dataset, **kwargs)
+        if key:
+            inputs = KeyDataset(inputs, key)
+        outputs = super().__call__(inputs, **kwargs)
+        yield from tqdm(outputs, **tqdm_kwargs)
 
     def postprocess(self, *args: Any, **kwargs: Any) -> dict[str, float]:
         outputs = super().postprocess(*args, **kwargs)
