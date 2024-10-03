@@ -1,4 +1,5 @@
 import io
+from collections import Counter
 from collections.abc import Hashable, Sequence
 from functools import singledispatchmethod
 from typing import Any, Self
@@ -10,6 +11,7 @@ from pydrive2.files import GoogleDriveFile
 
 from newsuse.config import Config
 from newsuse.data import DataFrame
+from newsuse.math import entropy
 from newsuse.types import PathLike
 from newsuse.utils import inthash
 
@@ -353,3 +355,64 @@ class Annotations:
             ann[col] = ann.pop(f"{col}_new").combine_first(ann.pop(col))
         self.ann = ann
         return self
+
+
+class AnnotationsAnalysis:
+    """Annotations analysis manager.
+
+    This is a handler class used for reading, building and writing Excel files
+    for detailed analyses of intercoder reliability, coder notes and mismatches between
+    annotations.
+
+    Attributes
+    ----------
+    annotations
+        Annotations instance.
+    """
+
+    def __init__(
+        self, annotations: Annotations, problems: pd.DataFrame | None = None
+    ) -> None:
+        self.annotations = Annotations(
+            config=annotations.config, ann=annotations.ann.copy()
+        )
+        self.problems = problems
+
+    @property
+    def config(self) -> Config:
+        return self.annotations.config.analysis
+
+    def is_note(self, text: pd.Series) -> pd.Series:
+        """Check if ``text`` values are annotations with notes."""
+        labels = r"|".join(self.annotations.config.labels)
+        pattern = rf"^({labels})\b\S+"
+        return text.str.match(pattern, case=False)
+
+    def find_problems(self) -> Self:
+        """Find problematic annotations."""
+        ann = self.annotations.ann[self.annotations.annotator_cols]
+        mask = pd.Series(False, index=ann.index)
+        for acol in ann.columns:
+            mask |= self.is_note(ann[acol])
+        mask |= ann.apply("nunique", axis=1) > 1
+        problems = self.annotations.ann[mask].reset_index(drop=True)
+        scores = (
+            problems[self.annotations.annotator_cols]
+            .apply(lambda s: Counter(s.dropna()), axis=1)
+            .pipe(pd.Series)
+            .map(entropy)
+        )
+        colidx = problems.columns.tolist().index(self.annotations.annotator_cols[-1]) + 1
+        problems.insert(colidx, "score", scores)
+        self.problems = problems.sort_values("score", ascending=False)
+        return self
+
+    def write(self, *args: Any, **kwargs: Any) -> None:
+        """Write Excel sheet with problematic example."""
+        if self.problems is None:
+            self.find_problems()
+        annotations = Annotations(
+            config=self.annotations.config,
+            ann=self.problems,
+        )
+        annotations.write(*args, **kwargs)
