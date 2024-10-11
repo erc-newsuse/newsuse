@@ -67,4 +67,20 @@ def read_data(*args: Any, **kwargs: Any) -> DataFrame:
         data.insert(pos, "timestamp", ts)
 
     data.drop_duplicates(subset=key, ignore_index=True, inplace=True)
-    return data
+    prefix = "sotrender@"
+    data[key] = (prefix + data[key].astype(str).str.removeprefix(prefix)).convert_dtypes()
+    data.rename(columns={key: "key"}, inplace=True)
+
+    intcols = [
+        "likes",
+        "comments",
+        "shares",
+        "ini",
+        *[c for c in data.columns if c.startswith("reactions_")],
+    ]
+    for col in intcols:
+        data[col] = data[col].astype("int64[pyarrow]")
+
+    data.insert(1, "text_type", "fb_post")
+
+    return data.convert_dtypes()

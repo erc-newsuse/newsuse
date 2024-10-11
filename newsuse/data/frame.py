@@ -305,8 +305,8 @@ class DataFrame(pd.DataFrame):
         The file must define proper MIME type and file extension.
         """
         self.check_gdrive_file(target)
-        ext = str(target["ext"]).removeprefix(".")
-        writer = self._get_writer(f".{ext}")
+        ext = str(target["fileExtension"]).removeprefix(".")
+        writer = self._get_writer(ext)
         buffer = io.BytesIO()
         writer(buffer, *args, **kwargs)
         target.content = buffer
@@ -315,7 +315,7 @@ class DataFrame(pd.DataFrame):
     def to_gdrive(self, target: GoogleDrive, id: str, *args: Any, **kwargs: Any) -> None:
         """Write to :class:`pydrive2.drives.GoogleDrive` file by ``id``."""
         file = target.CreateFile({"id": id})
-        self.to_gdrive(file, *args, **kwargs)
+        self.to_gdrive_file(file, *args, **kwargs)
 
     @staticmethod
     def check_gdrive_file(target: GoogleDriveFile) -> None:

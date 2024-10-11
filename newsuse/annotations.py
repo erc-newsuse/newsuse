@@ -2,7 +2,7 @@ import io
 from collections import Counter
 from collections.abc import Hashable, Sequence
 from functools import singledispatchmethod
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import numpy as np
 import pandas as pd
@@ -13,7 +13,7 @@ from newsuse.config import Config
 from newsuse.data import DataFrame
 from newsuse.math import entropy
 from newsuse.types import PathLike
-from newsuse.utils import inthash
+from newsuse.utils import inthash, validate_call
 
 
 class Annotations:
@@ -33,17 +33,17 @@ class Annotations:
         Name of the column storing names of multiple sheets in ``source``.
     """
 
-    ann: DataFrame
+    data: DataFrame
     source: PathLike | None
     default_config = Config({"key": None, "dtype_backend": "pyarrow"})
 
     def __init__(
         self,
         config: Config,
-        ann: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
         sampler: np.random.Generator | None = None,
     ) -> None:
-        self.ann = ann
+        self.data = data
         self.config = Config(self.default_config.merge(config))
         self._sampler = sampler
 
@@ -59,47 +59,47 @@ class Annotations:
 
     def get_sampler(self, df: pd.DataFrame | None = None) -> np.random.Generator:
         if df is None:
-            df = self.ann
+            df = self.data
         data = df["key"].to_numpy()
         data.sort()
         seed = inthash(data) + self.config.seed
         return np.random.default_rng(seed)
 
-    def get_key(self, ann: pd.DataFrame) -> str:
+    def get_key(self, data: pd.DataFrame) -> str:
         if key := getattr(self.config, "key", None):
             return key
-        return ann.columns[0]
+        return data.columns[0]
 
     def _process_after_read(self, sheets: dict[str, pd.DataFrame]) -> DataFrame:
         if self.config.sheet_index_name:
-            ann = pd.concat(
+            data = pd.concat(
                 sheets, axis=0, ignore_index=False, names=[self.config.sheet_index_name]
             )
-            key = self.get_key(ann)
-            ann = (
-                ann.reset_index(self.config.sheet_index_name)
+            key = self.get_key(data)
+            data = (
+                data.reset_index(self.config.sheet_index_name)
                 .set_index(key)
                 .reset_index(key)
                 .reset_index(drop=True)
             )
         else:
-            ann = pd.concat(sheets, axis=0, ignore_index=True)
-            key = self.key or ann.columns[0]
-        ann.dropna(subset=[key, self.config.content_name], ignore_index=True, inplace=True)
-        acols = self.get_annotator_cols(ann)
+            data = pd.concat(sheets, axis=0, ignore_index=True)
+            key = self.key or data.columns[0]
+        data.dropna(subset=[key, self.config.content_name], ignore_index=True, inplace=True)
+        acols = self.get_annotator_cols(data)
         for acol in acols:
-            if acol not in ann:
-                ann.insert(ann.shape[1] - 1, acol, "")
-            ann[acol] = self.sanitize_labels(ann[acol])
-        ann = self.order_cols(ann).rename(columns={key: "key"})
-        ann = ann.convert_dtypes(dtype_backend=self.config.dtype_backend)
-        return DataFrame(ann)
+            if acol not in data:
+                data.insert(data.shape[1] - 1, acol, "")
+            data[acol] = self.sanitize_labels(data[acol])
+        data = self.order_cols(data).rename(columns={key: "key"})
+        data = data.convert_dtypes(dtype_backend=self.config.dtype_backend)
+        return DataFrame(data)
 
     @singledispatchmethod
     def read(self, source, **kwargs: Any) -> Self:
         """Read annotations' data from ``source``."""
         sheets = DataFrame.from_excel(source, sheet_name=None, **kwargs)
-        self.ann = self._process_after_read(sheets, **kwargs)
+        self.data = self._process_after_read(sheets, **kwargs)
         return self
 
     @read.register
@@ -110,7 +110,7 @@ class Annotations:
             errmsg = f"cannot read annotations in '.{ext}' format"
             raise ValueError(errmsg)
         sheets = DataFrame.from_gdrive_file(source, sheet_name=None, **kwargs)
-        self.ann = self._process_after_read(sheets, **kwargs)
+        self.data = self._process_after_read(sheets, **kwargs)
         return self
 
     @read.register
@@ -118,15 +118,15 @@ class Annotations:
         file = source.CreateFile({"id": id})
         return self.read(file, **kwargs)
 
-    def order_cols(self, ann: pd.DataFrame) -> pd.DataFrame:
+    def order_cols(self, data: pd.DataFrame) -> pd.DataFrame:
         acols = self.annotator_cols
-        front = [c for c in ann.columns if c not in [*acols, self.config.content_name]]
-        return ann[[*front, *acols, self.config.content_name]]
+        front = [c for c in data.columns if c not in [*acols, self.config.content_name]]
+        return data[[*front, *acols, self.config.content_name]]
 
-    def get_annotator_cols(self, ann: pd.DataFrame | None = None) -> list[str]:
+    def get_annotator_cols(self, data: pd.DataFrame | None = None) -> list[str]:
         acols = self.annotator_cols
-        if ann is not None:
-            for acol in ann:
+        if data is not None:
+            for acol in data:
                 if acol.startswith("@") and acol not in acols:
                     acols.append(acol)
         return acols
@@ -166,7 +166,7 @@ class Annotations:
         groups: str | Sequence[str] = (),
         weights: Hashable | None = None,
     ) -> DataFrame:
-        ignore = self.ann["key"].to_numpy()
+        ignore = self.data["key"].to_numpy()
         sheet_name = self.config.sheet_index_name
         if groups and isinstance(groups, str):
             groups = [groups]
@@ -213,7 +213,7 @@ class Annotations:
         if n > 0:
             msg = f"Adding {n} samples per group"
             sample = self._sample_from(data, n, **kwargs)
-            self.ann = DataFrame(pd.concat([self.ann, sample], axis=0, ignore_index=True))
+            self.data = DataFrame(pd.concat([self.data, sample], axis=0, ignore_index=True))
         else:
             msg = "Adding no new samples"
             print(msg)
@@ -245,10 +245,10 @@ class Annotations:
             return pd.concat([filled, empty_shuffled], axis=0, ignore_index=True)
 
         if groups is None:
-            self.ann = shuffle(self.ann)
+            self.data = shuffle(self.data)
         else:
-            self.ann = self.ann.groupby(groups).apply(shuffle)
-        self.ann.reset_index(drop=True, inplace=True)
+            self.data = self.data.groupby(groups).apply(shuffle)
+        self.data.reset_index(drop=True, inplace=True)
 
         return self
 
@@ -282,11 +282,11 @@ class Annotations:
 
         with pd.ExcelWriter(target, engine=engine) as writer:
             if index_name := self.config.sheet_index_name:
-                for key, df in self.ann.groupby([index_name]):
+                for key, df in self.data.groupby([index_name]):
                     sheet_name, *_ = key
                     do_write(df, writer, sheet_name=sheet_name, index_name=index_name)
             else:
-                do_write(self.ann, writer, index_name=index_name)
+                do_write(self.data, writer, index_name=index_name)
 
     @write.register
     def _(self, target: GoogleDriveFile, **kwargs: Any) -> None:
@@ -305,8 +305,8 @@ class Annotations:
         self,
         *,
         __validate_uniqueness: bool = True,
-        **labels: PathLike,
-    ) -> DataFrame:
+        **labels: pd.DataFrame,
+    ) -> Self:
         """Get annotations data frame with human and possibly some external labels.
 
         Final ``"label"`` column is built by coalescing label columns
@@ -315,7 +315,8 @@ class Annotations:
         Parameters
         ----------
         **labels
-            Key-value pairs from label names to data paths.
+            Key-value pairs from label names to dataframes with example keys
+            in the first column and label/score columns after.
 
         Raises
         ------
@@ -323,37 +324,48 @@ class Annotations:
             If there are duplicated records after left-joining
             with external labels.
         """
-        acols = [a for a in self.get_annotator_cols(self.ann) if a in self.ann]
-        ann = self.ann.assign(human=lambda df: df[acols].mode(axis=1, dropna=True)[0])
-        ann.drop(columns=acols, inplace=True)
-        for name, path in labels.items():
-            data = DataFrame.from_(path)
-            key = self.get_key(data)
+        data = self.data.copy()
+        acols = [a for a in self.get_annotator_cols(self.data) if a in data]
+        data["human"] = data[acols].mode(axis=1, dropna=True)[0]
+        data.drop(columns=acols, inplace=True)
+        for name, df in labels.items():
+            key = self.get_key(df)
             rename = {key: "key", "label": name}
-            if "prob" in data:
-                rename["prob"] = f"{name}_prob"
-            data.rename(columns=rename, inplace=True)
-            ann = ann.merge(data, how="left", on="key")
+            if (col := "score") in df:
+                rename[col] = f"{name}_{col}"
+            df.rename(columns=rename, inplace=True)
+            data = data.merge(df, how="left", on="key")
 
-        if __validate_uniqueness and len(ann) != ann["key"].nunique():
+        if __validate_uniqueness and len(data) != data["key"].nunique():
             errmsg = "there are duplicated records after joining with external labels"
             raise ValueError(errmsg)
 
-        ann["label"] = ann["human"]
+        data["label"] = data["human"]
         for label in labels:
-            ann["label"] = ann["label"].combine_first(ann[label])
+            data["label"] = data["label"].combine_first(data[label])
 
-        return ann
+        self.data = data
+        return self
 
     def update_columns(self, data: pd.DataFrame, *columns: str) -> Self:
         """Update values in ``*columns`` using new ``data``."""
         key = self.get_key(data)
         remap = {key: "key", **{c: f"{c}_new" for c in columns}}
         data = data[list(remap)].rename(columns=remap)
-        ann = self.ann.merge(data, how="left", on="key")
+        ann = self.data.merge(data, how="left", on="key")
         for col in columns:
             ann[col] = ann.pop(f"{col}_new").combine_first(ann.pop(col))
-        self.ann = ann
+        self.data = ann
+        return self
+
+    def remove_notes(self) -> Self:
+        """Remove annotator notes from annotation fields."""
+        data = self.data.copy()
+        for label in self.config.labels:
+            pattern = rf"^{label}\b.*$"
+            for name in self.annotator_cols:
+                data[name] = data[name].replace(pattern, label, regex=True).str.strip()
+        self.data = data
         return self
 
 
@@ -374,7 +386,7 @@ class AnnotationsAnalysis:
         self, annotations: Annotations, problems: pd.DataFrame | None = None
     ) -> None:
         self.annotations = Annotations(
-            config=annotations.config, ann=annotations.ann.copy()
+            config=annotations.config, data=annotations.data.copy()
         )
         self.problems = problems
 
@@ -390,12 +402,12 @@ class AnnotationsAnalysis:
 
     def find_problems(self) -> Self:
         """Find problematic annotations."""
-        ann = self.annotations.ann[self.annotations.annotator_cols]
-        mask = pd.Series(False, index=ann.index)
-        for acol in ann.columns:
-            mask |= self.is_note(ann[acol])
-        mask |= ann.apply("nunique", axis=1) > 1
-        problems = self.annotations.ann[mask].reset_index(drop=True)
+        data = self.annotations.data[self.annotations.annotator_cols]
+        mask = pd.Series(False, index=data.index)
+        for acol in data.columns:
+            mask |= self.is_note(data[acol])
+        mask |= data.apply("nunique", axis=1) > 1
+        problems = self.annotations.data[mask].reset_index(drop=True)
         scores = (
             problems[self.annotations.annotator_cols]
             .apply(lambda s: Counter(s.dropna()), axis=1)
@@ -413,6 +425,74 @@ class AnnotationsAnalysis:
             self.find_problems()
         annotations = Annotations(
             config=self.annotations.config,
-            ann=self.problems,
+            data=self.problems,
         )
         annotations.write(*args, **kwargs)
+
+
+class InterCoderAgreement:
+    """Inter coder agreement analysis.
+
+    Attributes
+    ----------
+    data
+        Data frame with coder responses.
+        Column names are coder aliases and rows are unit-responses.
+    """
+
+    _MarginT = Literal["coders", "units"]
+
+    def __init__(self, data: pd.DataFrame) -> None:
+        self.data = data
+        self.data = self.data[self.margin("units") >= 2]
+
+    @property
+    def coders(self) -> list[Hashable]:
+        return self.data.columns.tolist()
+
+    @validate_call
+    def margin(self, which: _MarginT) -> pd.Series:
+        if which == "coders":
+            return self.data.notnull().sum(axis=0)
+        return self.data.notnull().sum(axis=1)
+
+    @validate_call
+    def n_responses(self, which: _MarginT = "coders") -> pd.DataFrame:
+        data = self.data if which == "coders" else self.data.T
+        table = pd.DataFrame([], index=data.columns, columns=data.columns)
+        for i, ci in enumerate(data.columns):
+            for j, cj in enumerate(data.columns[: i + 1]):
+                table.iloc[i, j] = table.iloc[j, i] = len(data[[ci, cj]].dropna())
+        return table
+
+    @validate_call
+    def n_agree(self, which: _MarginT = "coders") -> pd.DataFrame:
+        data = self.data if which == "coders" else self.data.T
+        table = pd.DataFrame([], index=data.columns, columns=data.columns)
+        for i, ci in enumerate(data.columns):
+            table.iloc[i, i] = len(data[ci].dropna())
+            for j, cj in enumerate(data.columns[:i]):
+                df = data[[ci, cj]].dropna()
+                table.iloc[i, j] = table.iloc[j, i] = (df[ci] == df[cj]).sum()
+        return table
+
+    @validate_call
+    def consistency(self, which: _MarginT = "coders") -> float:
+        return self.n_agree(which).sum().sum() / self.n_responses(which).sum().sum()
+
+    @validate_call
+    def pairwise_consistency(self, which: _MarginT = "coders") -> pd.DataFrame:
+        return self.n_agree(which) / self.n_responses(which)
+
+    @classmethod
+    def from_annotations(cls, annotations: Annotations) -> Self:
+        """Construct from :class`Annotations` instance."""
+        key = annotations.get_key(annotations.data)
+        data = (
+            annotations.data[[key, *annotations.annotator_cols]]
+            .rename(columns=lambda c: str(c).removeprefix("@"))
+            .rename(columns={key: "key"})
+            .reset_index(drop=True)
+            .set_index(key)
+        )
+        return cls(data)

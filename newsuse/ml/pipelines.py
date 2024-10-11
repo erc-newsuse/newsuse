@@ -7,7 +7,7 @@ import transformers
 from tqdm.auto import tqdm
 from transformers.pipelines import PIPELINE_REGISTRY
 
-from newsuse.ml import KeyDataset
+from .datasets import KeyDataset, SimpleDataset
 
 __all__ = (
     "pipeline",
@@ -51,10 +51,9 @@ class TextClassificationPipeline(transformers.TextClassificationPipeline):
             tqdm_kwargs["total"] = len(inputs)
         except TypeError:
             pass
-        if key:
-            inputs = KeyDataset(inputs, key)
-        outputs = super().__call__(inputs, **kwargs)
-        yield from tqdm(outputs, **tqdm_kwargs)
+        inputs = KeyDataset(inputs, key) if key else SimpleDataset(inputs)
+        outputs = tqdm(super().__call__(inputs, **kwargs), **tqdm_kwargs)
+        return list(outputs)
 
     def postprocess(self, *args: Any, **kwargs: Any) -> dict[str, float]:
         outputs = super().postprocess(*args, **kwargs)

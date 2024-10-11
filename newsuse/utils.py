@@ -69,4 +69,4 @@ def validate_call(
 ) -> Callable[..., Any] | Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Validate call arguments using :func:`pydantic.validate_call`."""
     config = pydantic.ConfigDict({"arbitrary_types_allowed": True, **(config or {})})
-    return validate_call(func, config=config, **kwargs)
+    return pydantic.validate_call(func, config=config, **kwargs)
