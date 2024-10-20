@@ -15,7 +15,7 @@ from transformers.modeling_outputs import BaseModelOutput, SequenceClassifierOut
 
 from newsuse.utils import validate_call
 
-from .heads import SequenceClassificationHead, SequenceClassificationHeadConfig
+from .modules import SequenceClassificationHead, SequenceClassificationHeadConfig
 
 _ProblemT = Literal[
     "regression", "single_label_classification", "multi_label_classification"
@@ -32,7 +32,7 @@ class SequenceClassifierTransformerConfig(PretrainedConfig):
         Name or path of a pretrained base language model.
     base_config
         Config of the base model.
-    head_config
+    head
         Config of the classification head.
     """
 
@@ -41,40 +41,41 @@ class SequenceClassifierTransformerConfig(PretrainedConfig):
     @validate_call
     def __init__(
         self,
-        base: str | None = None,
-        base_config: PretrainedConfig | Mapping | None = None,
-        head_config: PretrainedConfig | Mapping | None = None,
+        base_name_or_path: str | None = None,
+        base: PretrainedConfig | Mapping | None = None,
+        head: SequenceClassificationHeadConfig | Mapping | None = None,
         **kwargs: Any,
     ) -> None:
-        if not base and isinstance(base_config, Mapping):
-            base = base_config.get("_name_or_path")
-        if isinstance(base_config, PretrainedConfig):
-            if base and base_config._name_or_path != base:
+        if not base_name_or_path and isinstance(base, Mapping):
+            base_name_or_path = base.get("_name_or_path")
+        if isinstance(base, PretrainedConfig):
+            if base_name_or_path and base._name_or_path != base_name_or_path:
                 errmsg = (
-                    f"'base={base}' but 'base_config' "
-                    f"is for '{base_config._name_or_path}'"
+                    f"'base={base_name_or_path}' but 'base_config' "
+                    f"is for '{base._name_or_path}'"
                 )
                 raise ValueError(errmsg)
-        elif base:
-            base_config = AutoConfig.from_pretrained(base, **(base_config or {}))
-        self.base_config = base_config
+        elif base_name_or_path:
+            base = AutoConfig.from_pretrained(base_name_or_path, **(base or {}))
+        self.base = base
 
-        if not isinstance(head_config, SequenceClassificationHeadConfig):
-            head_config = SequenceClassificationHeadConfig(**(head_config or {}))
-        if isinstance(self.base_config, PretrainedConfig):
-            if head_config.dim is None:
-                head_config.set_dim(self.base_config.dim)
-            if head_config.dropout is None:
-                head_config.set_dropout(self.base_config.seq_classif_dropout)
-            if head_config.initializer_range is None:
-                head_config.initializer_range = self.base_config.initializer_range
-        self.head_config = head_config
+        if isinstance(head, SequenceClassificationHeadConfig):
+            head.dim = self.base.dim
+        elif self.base:
+            head = dict(head or {})
+            head["dim"] = self.base.dim
+            head["dropout"] = head.get("dropout", self.base.seq_classif_dropout)
+            head["initializer_range"] = head.get(
+                "initializer_range", self.base.initializer_range
+            )
+        head = SequenceClassificationHeadConfig(**(head or {}))
+        self.head = head
         super().__init__(**kwargs)
-        self.head_config.num_labels = self.num_labels
+        self.head.num_labels = self.num_labels
 
     @property
-    def base(self) -> str:
-        return self.base_config._name_or_path
+    def base_name_or_path(self) -> str:
+        return self.base._name_or_path
 
 
 class SequenceClassifierTransformer(PreTrainedModel):
@@ -82,8 +83,8 @@ class SequenceClassifierTransformer(PreTrainedModel):
 
     def __init__(self, config: config_class) -> None:
         super().__init__(config)
-        self.base = AutoModel.from_pretrained(self.config.base)
-        self.head = SequenceClassificationHead(self.config.head_config)
+        self.base = AutoModel.from_pretrained(self.config.base_name_or_path)
+        self.head = SequenceClassificationHead(self.config.head)
         self.loss_func = None
         # Initialize weights and apply final processing
         self.post_init()
@@ -104,7 +105,6 @@ class SequenceClassifierTransformer(PreTrainedModel):
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
     ) -> torch.Tensor:
-        # ruff: noqa: C901
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
@@ -165,6 +165,7 @@ class SequenceClassifierTransformer(PreTrainedModel):
                 self.config.problem_type = "multi_label_classification"
 
     def _get_loss_function(self) -> _LossFuncT:
+        # ruff: noqa: C901
         if self.config.problem_type == "regression":
 
             def loss_fct_regression(

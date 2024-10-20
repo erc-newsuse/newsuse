@@ -39,11 +39,11 @@ class FeedForwardNetworkConfig(PretrainedConfig):
     @validate_call
     def __init__(
         self,
-        dim: PositiveInt | None = None,
+        dim: PositiveInt = 1,
         num_layers: NonNegativeInt = 0,
         bias: bool = True,
         activation: _ActivationT = "relu",
-        dropout: NonNegativeFloat | None = None,
+        dropout: NonNegativeFloat = 0.1,
         norm: _NormT = "layer",
         norm_strategy: _NormStrategyT = "ic",
         **kwargs: Any,
