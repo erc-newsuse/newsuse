@@ -1,7 +1,8 @@
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from shutil import rmtree
-from typing import Any
+from typing import Any, Self
 
 import evaluate
 import numpy as np
@@ -10,6 +11,12 @@ from transformers import EvalPrediction
 from transformers.trainer import TrainOutput
 
 from newsuse.types import PathLike
+
+from ..datasets import Dataset, DatasetDict
+
+
+class TrainingArguments(transformers.TrainingArguments):
+    pass
 
 
 class Trainer(transformers.Trainer):
@@ -51,9 +58,11 @@ class Trainer(transformers.Trainer):
 
         return compute_metrics
 
-    def train(self, *args: Any, **kwargs: Any) -> TrainOutput:
+    def train(
+        self, resume_from_checkpoint: str | bool | None = None, *args: Any, **kwargs: Any
+    ) -> TrainOutput:
         outdir = Path(self.args.output_dir)
-        if outdir.exists():
+        if not resume_from_checkpoint and outdir.exists():
             for checkpoint in outdir.glob("checkpoint-*"):
                 if checkpoint.is_file():
                     checkpoint.unlink()
@@ -71,3 +80,53 @@ class Trainer(transformers.Trainer):
                     else:
                         rmtree(path)
         super().save_model(output_dir, *args, **kwargs)
+
+    def _set_signature_columns_if_needed(self) -> None:
+        super()._set_signature_columns_if_needed()
+        if "weight" in self.train_dataset.column_names:
+            self._signature_columns = [*self._signature_columns, "weight"]
+
+
+class TrainingMixin(ABC):
+    @classmethod
+    @abstractmethod
+    def factory(cls, *args: Any, **kwargs: Any) -> Callable[..., Self]:
+        """Get ``model_init()`` factory function."""
+
+    @classmethod
+    def get_tokenizer(
+        cls, name_or_path: str, *args: Any, **kwargs: Any
+    ) -> transformers.PreTrainedTokenizerBase:
+        """Get model tokenizer."""
+        return transformers.AutoTokenizer.from_pretrained(name_or_path, *args, **kwargs)
+
+    @classmethod
+    def get_training_arguments(cls, *args: Any, **kwargs: Any) -> TrainingArguments:
+        """Get :class:`transformers.TrainingArguments` instance."""
+        return TrainingArguments(*args, **kwargs)
+
+    @classmethod
+    def get_trainer(
+        cls,
+        *,
+        args: TrainingArguments,
+        model: Self | None = None,
+        model_init: Callable[..., Self] | None = None,
+        tokenizer: transformers.PreTrainedTokenizerBase | None = None,
+        **kwargs: Any,
+    ) -> Trainer:
+        """Get :class:`Trainer` instance."""
+        return Trainer(
+            args=args, model=model, model_init=model_init, tokenizer=tokenizer, **kwargs
+        )
+
+    @classmethod
+    def preprocess_dataset(
+        cls,
+        dataset: Dataset | DatasetDict,
+        tokenizer: transformers.PreTrainedTokenizerBase,
+        *args: Any,  # noqa
+        **kwargs: Any,  # noqa
+    ) -> Dataset:
+        """Preprocess ``dataset`` before training."""
+        return dataset.tokenize(tokenizer)

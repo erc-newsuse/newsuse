@@ -1,6 +1,6 @@
 import io
 from collections import Counter
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable, Iterable, Sequence
 from functools import singledispatchmethod
 from typing import Any, Literal, Self
 
@@ -31,6 +31,8 @@ class Annotations:
         Defaults to the first column when ``None``.
     sheet_index_name
         Name of the column storing names of multiple sheets in ``source``.
+    active_learning
+        Should annotation process support active learning approach.
     """
 
     data: DataFrame
@@ -41,21 +43,61 @@ class Annotations:
         self,
         config: Config,
         data: pd.DataFrame | None = None,
+        *,
         sampler: np.random.Generator | None = None,
+        metadata: str | Iterable[str] = (),
     ) -> None:
         self.data = data
         self.config = Config(self.default_config.merge(config))
+        self._metadata = tuple(metadata)
         self._sampler = sampler
+        self._aselect = None
+
+    @property
+    def active_learning(self) -> bool:
+        return self.config.get("active_learning", True)
+
+    @property
+    def metadata(self) -> list[str]:
+        metadata = self._metadata
+        if self.active_learning:
+            for field in [
+                "consensus",
+                "human",
+                "label",
+                "score",
+            ]:
+                if field not in metadata:
+                    metadata = [field, *metadata]
+        return metadata
 
     @property
     def annotator_cols(self) -> list[str]:
-        return [a if a.startswith("@") else f"@{a}" for a in self.config.annotators]
+        acols = [a if a.startswith("@") else f"@{a}" for a in self.config.annotators]
+        if self._aselect:
+            acols = [a for a in acols if a in self._aselect]
+        return acols
 
     @property
     def sampler(self) -> np.random.Generator:
         if self._sampler is None:
             self._sampler = self.get_sampler()
         return self._sampler
+
+    def _handle_cols(self, data: pd.DataFrame) -> pd.DataFrame:
+        acols = self.get_annotator_cols(data)
+        first = ["key"]
+        if self.config.sheet_index_name:
+            first.append(self.config.sheet_index_name)
+        front = [*first, *self.metadata, *acols]
+        tail = [self.config.content_name]
+        mid = [c for c in data.columns if c not in front and c not in tail]
+        usecols = [*front, *mid, *tail]
+        for col in usecols:
+            if col not in data:
+                data[col] = pd.NA
+                data[col] = data[col].convert_dtypes()
+        return data[usecols].convert_dtypes()
 
     def get_sampler(self, df: pd.DataFrame | None = None) -> np.random.Generator:
         if df is None:
@@ -70,7 +112,7 @@ class Annotations:
             return key
         return data.columns[0]
 
-    def _process_after_read(self, sheets: dict[str, pd.DataFrame]) -> DataFrame:
+    def _process_after_read(self, sheets: dict[str, pd.DataFrame]) -> Self:
         if self.config.sheet_index_name:
             data = pd.concat(
                 sheets, axis=0, ignore_index=False, names=[self.config.sheet_index_name]
@@ -81,26 +123,41 @@ class Annotations:
                 .set_index(key)
                 .reset_index(key)
                 .reset_index(drop=True)
+                .convert_dtypes()
             )
         else:
             data = pd.concat(sheets, axis=0, ignore_index=True)
             key = self.key or data.columns[0]
         data.dropna(subset=[key, self.config.content_name], ignore_index=True, inplace=True)
+        data = data[data[self.config.content_name] != ""]
         acols = self.get_annotator_cols(data)
         for acol in acols:
             if acol not in data:
                 data.insert(data.shape[1] - 1, acol, "")
             data[acol] = self.sanitize_labels(data[acol])
+            if (ccol := "#" + acol.removeprefix("@")) in data:
+                data[ccol] = self.sanitize_labels(data[ccol])
         data = self.order_cols(data).rename(columns={key: "key"})
         data = data.convert_dtypes(dtype_backend=self.config.dtype_backend)
-        return DataFrame(data)
+        data = self._handle_cols(data)
+
+        for col in list(data):
+            if col.startswith("#"):
+                orig = "@" + col.removeprefix("#")
+                data[orig] = data[col].combine_first(data[orig]).str.strip()
+                del data[col]
+
+        self.data = DataFrame(data)
+        if self.active_learning:
+            self.with_labels()
+        self.data = self.data.convert_dtypes()
+        return self
 
     @singledispatchmethod
     def read(self, source, **kwargs: Any) -> Self:
         """Read annotations' data from ``source``."""
         sheets = DataFrame.from_excel(source, sheet_name=None, **kwargs)
-        self.data = self._process_after_read(sheets, **kwargs)
-        return self
+        return self._process_after_read(sheets, **kwargs)
 
     @read.register
     def _(self, source: GoogleDriveFile, **kwargs: Any) -> Self:
@@ -110,8 +167,7 @@ class Annotations:
             errmsg = f"cannot read annotations in '.{ext}' format"
             raise ValueError(errmsg)
         sheets = DataFrame.from_gdrive_file(source, sheet_name=None, **kwargs)
-        self.data = self._process_after_read(sheets, **kwargs)
-        return self
+        return self._process_after_read(sheets, **kwargs)
 
     @read.register
     def _(self, source: GoogleDrive, id: str, **kwargs: Any) -> Self:
@@ -156,7 +212,7 @@ class Annotations:
         for label in self.config.labels:
             use |= acol.str.startswith(label)
         acol[~use] = pd.NA
-        return acol
+        return acol.str.strip().convert_dtypes()
 
     def _sample_from(
         self,
@@ -164,7 +220,7 @@ class Annotations:
         n: int,
         *,
         groups: str | Sequence[str] = (),
-        weights: Hashable | None = None,
+        weights: Hashable | Sequence | None = None,
     ) -> DataFrame:
         ignore = self.data["key"].to_numpy()
         sheet_name = self.config.sheet_index_name
@@ -212,11 +268,13 @@ class Annotations:
         """
         if n > 0:
             msg = f"Adding {n} samples per group"
+            if kwargs:
+                msg += f" with {kwargs}"
             sample = self._sample_from(data, n, **kwargs)
             self.data = DataFrame(pd.concat([self.data, sample], axis=0, ignore_index=True))
         else:
             msg = "Adding no new samples"
-            print(msg)
+        print(msg)
         return self
 
     def shuffle_empty(self, *, groups: Hashable | Sequence[Hashable] | None = None) -> Self:
@@ -231,7 +289,6 @@ class Annotations:
         print(msg)
 
         def shuffle(df: pd.DataFrame) -> pd.DataFrame:
-            df = df.sort_values(by="key")
             has_annotations = df[acols].notnull().any(axis=1)
             filled = df[has_annotations]
             empty = df[~has_annotations]
@@ -261,6 +318,7 @@ class Annotations:
         textcol_width: float = 750,
         engine: str = "xlsxwriter",
     ) -> None:
+        # ruff: noqa: C901
         def do_write(
             df: pd.DataFrame,
             writer: pd.ExcelWriter,
@@ -268,6 +326,11 @@ class Annotations:
             sheet_name: str = "Sheet1",
             index_name: str | None = None,
         ) -> None:
+            for acol in self.annotator_cols:
+                if acol not in df:
+                    df[acol] = pd.NA
+                    df[acol] = df[acol].convert_dtypes()
+            df = self._handle_cols(df)
             if index_name and index_name in df:
                 del df[index_name]
             df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -325,9 +388,12 @@ class Annotations:
             with external labels.
         """
         data = self.data.copy()
-        acols = [a for a in self.get_annotator_cols(self.data) if a in data]
-        data["human"] = data[acols].mode(axis=1, dropna=True)[0]
-        data.drop(columns=acols, inplace=True)
+        acols = [a for a in self.annotator_cols if a in data]
+        for acol in acols:
+            data[acol] = self.remove_notes(data[acol]).convert_dtypes()
+        human = data[acols].mode(axis=1, dropna=True, sort_values=False)[0]
+        data["human"] = human.to_numpy()
+        nrows = len(data)
         for name, df in labels.items():
             key = self.get_key(df)
             rename = {key: "key", "label": name}
@@ -336,7 +402,7 @@ class Annotations:
             df.rename(columns=rename, inplace=True)
             data = data.merge(df, how="left", on="key")
 
-        if __validate_uniqueness and len(data) != data["key"].nunique():
+        if __validate_uniqueness and len(data) != data["key"].nunique() == nrows:
             errmsg = "there are duplicated records after joining with external labels"
             raise ValueError(errmsg)
 
@@ -344,7 +410,10 @@ class Annotations:
         for label in labels:
             data["label"] = data["label"].combine_first(data[label])
 
-        self.data = data
+        self.data["human"] = data["human"].copy()
+        n_uniq = data[acols].nunique(axis=1)
+        self.data["consensus"] = np.where(n_uniq > 0, n_uniq == 1, pd.NA)
+        self.data = self.data.convert_dtypes()
         return self
 
     def update_columns(self, data: pd.DataFrame, *columns: str) -> Self:
@@ -358,14 +427,15 @@ class Annotations:
         self.data = ann
         return self
 
-    def remove_notes(self) -> Self:
-        """Remove annotator notes from annotation fields."""
-        data = self.data.copy()
-        for label in self.config.labels:
-            pattern = rf"^{label}\b.*$"
-            for name in self.annotator_cols:
-                data[name] = data[name].replace(pattern, label, regex=True).str.strip()
-        self.data = data
+    def remove_notes(self, s: pd.Series) -> pd.Series:
+        """Remove annotator notes from labels."""
+        s = s.str.strip().str.replace(r"^([A-Za-z]+).*$", r"\1", regex=True).str.strip()
+        return s.convert_dtypes()
+
+    def select_annotators(self, *annotators: str) -> Self:
+        """Use only selected ``annotators``."""
+        acols = ["@" + a.removeprefix("@") for a in annotators]
+        self._aselect = tuple(acols)
         return self
 
 
@@ -414,8 +484,9 @@ class AnnotationsAnalysis:
             .pipe(pd.Series)
             .map(entropy)
         )
-        colidx = problems.columns.tolist().index(self.annotations.annotator_cols[-1]) + 1
-        problems.insert(colidx, "score", scores)
+        if (col := "score") not in problems:
+            idx = problems.columns.tolist().index(self.annotations.annotator_cols[-1]) + 1
+            problems.insert(idx, col, scores)
         self.problems = problems.sort_values("score", ascending=False)
         return self
 

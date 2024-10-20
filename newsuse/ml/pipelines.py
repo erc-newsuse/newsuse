@@ -14,7 +14,6 @@ __all__ = (
     "TextClassificationPipeline",
 )
 
-
 _OutputT = dict[str, float]
 
 
@@ -22,7 +21,10 @@ _OutputT = dict[str, float]
 def pipeline(*args: Any, **kwargs: Any) -> transformers.Pipeline:
     if kwargs.get("device") is None and torch.cuda.is_available():
         kwargs["device"] = "cuda"
-    return transformers.pipeline(*args, **kwargs)
+    pipe = transformers.pipeline(*args, **kwargs)
+    if pipe.tokenizer is None and hasattr(pipe.model, "get_tokenizer"):
+        pipe.tokenizer = pipe.model.get_tokenizer()
+    return pipe
 
 
 class TextClassificationPipeline(transformers.TextClassificationPipeline):

@@ -1,5 +1,6 @@
 import io
 import re
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from functools import singledispatchmethod
 from pathlib import Path
@@ -39,6 +40,59 @@ class Series(pd.Series):
     ) -> Self:
         """Convert columns to best possible dtypes"""
         return super().convert_dtypes(*args, dtype_backend=dtype_backend, **kwargs)
+
+    def mode(
+        self,
+        *,
+        dropna: bool = True,
+        sort_values: bool | None = None,
+        **kwargs: Any,
+    ) -> Self:
+        """Return the mode(s) of the Series.
+
+        The mode is the value that appears most often. There can be multiple modes.
+
+        Always returns Series even if only one value is returned.
+
+        Parameters
+        ----------
+        dropna
+            Don't consider counts of NaN/NaT.
+        sort_values
+            Should values be sorted when there are multiple modes.
+            When ``True`` defaults to sorting lexicographically by values.
+            However, this can be modified by using ``**kwargs`` which are
+            passed to :func:`sorted`.
+
+        Returns
+        -------
+        Series
+            Modes of the Series in sorted order.
+
+        Examples
+        --------
+        >>> s = Series(["B", "A", "A", "B", "C"])
+        >>> s.mode()
+        0    B
+        1    A
+        dtype: ...
+        >>> s.mode(sort_values=True)
+        0    A
+        1    B
+        dtype: ...
+        >>> Series([]).mode()
+        Series([], dtype: ...)
+        """
+        s = self.dropna() if dropna else self
+        if s.size <= 0:
+            return s
+        counter = Counter(s)
+        max_count = max(counter.values())
+        modes = [(v, c) for v, c in counter.most_common() if c == max_count]
+        if sort_values:
+            kwargs = {"key": lambda m: m[0], **kwargs}
+            modes = sorted(modes, **kwargs)
+        return self._constructor([m[0] for m in modes]).convert_dtypes()
 
 
 class DataFrame(pd.DataFrame):
@@ -623,3 +677,6 @@ class DataFrame(pd.DataFrame):
         """
         file = source.CreateFile({"id": id})
         return cls.from_gdrive_file(file, *args, **kwargs)
+
+    def mode(self, axis, **kwargs: Any) -> pd.DataFrame:
+        return self.apply(Series.mode, axis=axis, **kwargs)
