@@ -145,7 +145,7 @@ class SequenceClassifierTransformer(PreTrainedModel):
         return pooled_output
 
     def get_tokenizer(self) -> PreTrainedTokenizer:
-        return AutoTokenizer.from_pretrained(self.config.base)
+        return AutoTokenizer.from_pretrained(self.config.base_name_or_path)
 
     @classmethod
     def from_dict(cls, config_dict: Mapping[str, Any], **kwargs: Any) -> Self:

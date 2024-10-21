@@ -1,5 +1,4 @@
 import io
-from collections import Counter
 from collections.abc import Hashable, Iterable, Sequence
 from functools import singledispatchmethod
 from typing import Any, Literal, Self
@@ -11,7 +10,6 @@ from pydrive2.files import GoogleDriveFile
 
 from newsuse.config import Config
 from newsuse.data import DataFrame
-from newsuse.math import entropy
 from newsuse.types import PathLike
 from newsuse.utils import inthash, validate_call
 
@@ -20,19 +18,6 @@ class Annotations:
     """Annotations class for managing iterative data annotation processes.
 
     It is assumed that annotations are stored in an Excel file.
-
-    Attributes
-    ----------
-    source
-        Address string for accessing annotations Excel sheet.
-        By default it is assumed it is a path to a local Excel file.
-    key
-        Name of the key column with unique observation identifiers.
-        Defaults to the first column when ``None``.
-    sheet_index_name
-        Name of the column storing names of multiple sheets in ``source``.
-    active_learning
-        Should annotation process support active learning approach.
     """
 
     data: DataFrame
@@ -43,11 +28,13 @@ class Annotations:
         self,
         config: Config,
         data: pd.DataFrame | None = None,
+        labels: pd.DataFrame | None = None,
         *,
         sampler: np.random.Generator | None = None,
         metadata: str | Iterable[str] = (),
     ) -> None:
         self.data = data
+        self.labels = labels
         self.config = Config(self.default_config.merge(config))
         self._metadata = tuple(metadata)
         self._sampler = sampler
@@ -63,6 +50,7 @@ class Annotations:
         if self.active_learning:
             for field in [
                 "consensus",
+                "correct",
                 "human",
                 "label",
                 "score",
@@ -149,7 +137,8 @@ class Annotations:
 
         self.data = DataFrame(data)
         if self.active_learning:
-            self.with_labels()
+            labels = {} if self.labels is None else {"labels": self.labels}
+            self.with_labels(**labels)
         self.data = self.data.convert_dtypes()
         return self
 
@@ -336,12 +325,17 @@ class Annotations:
             df.to_excel(writer, sheet_name=sheet_name, index=False)
             max_row, max_col = df.shape
             max_col -= 1
-            textf = writer.book.add_format({"text_wrap": True})
+            fmt_textf = writer.book.add_format({"text_wrap": True})
             sheet = writer.sheets[sheet_name]
             sheet.set_column(0, max_col, col_width)
-            sheet.set_column_pixels(max_col, max_col, textcol_width, textf)
+            sheet.set_column_pixels(max_col, max_col, textcol_width, fmt_textf)
             sheet.autofilter(0, 0, max_row, max_col)
             sheet.freeze_panes(1, 0)
+            fmt_hide = writer.book.add_format({"hidden": True})
+            for acol in self.get_annotator_cols(df):
+                if acol not in self.annotator_cols:
+                    idx = df.columns.tolist().index(acol)
+                    sheet.set_column(idx, idx, 0, fmt_hide)
 
         with pd.ExcelWriter(target, engine=engine) as writer:
             if index_name := self.config.sheet_index_name:
@@ -393,6 +387,7 @@ class Annotations:
             data[acol] = self.remove_notes(data[acol]).convert_dtypes()
         human = data[acols].mode(axis=1, dropna=True, sort_values=False)[0]
         data["human"] = human.to_numpy()
+
         nrows = len(data)
         for name, df in labels.items():
             key = self.get_key(df)
@@ -406,11 +401,17 @@ class Annotations:
             errmsg = "there are duplicated records after joining with external labels"
             raise ValueError(errmsg)
 
-        data["label"] = data["human"]
+        if labels and (col := "label") not in data:
+            data[col] = pd.NA
         for label in labels:
-            data["label"] = data["label"].combine_first(data[label])
+            data["label"] = data["label"].combine_first(label)
 
         self.data["human"] = data["human"].copy()
+        self.data["correct"] = np.where(
+            data[["label", "human"]].notnull().all(axis=1),
+            data["label"] == data["human"],
+            pd.NA,
+        )
         n_uniq = data[acols].nunique(axis=1)
         self.data["consensus"] = np.where(n_uniq > 0, n_uniq == 1, pd.NA)
         self.data = self.data.convert_dtypes()
@@ -437,68 +438,6 @@ class Annotations:
         acols = ["@" + a.removeprefix("@") for a in annotators]
         self._aselect = tuple(acols)
         return self
-
-
-class AnnotationsAnalysis:
-    """Annotations analysis manager.
-
-    This is a handler class used for reading, building and writing Excel files
-    for detailed analyses of intercoder reliability, coder notes and mismatches between
-    annotations.
-
-    Attributes
-    ----------
-    annotations
-        Annotations instance.
-    """
-
-    def __init__(
-        self, annotations: Annotations, problems: pd.DataFrame | None = None
-    ) -> None:
-        self.annotations = Annotations(
-            config=annotations.config, data=annotations.data.copy()
-        )
-        self.problems = problems
-
-    @property
-    def config(self) -> Config:
-        return self.annotations.config.analysis
-
-    def is_note(self, text: pd.Series) -> pd.Series:
-        """Check if ``text`` values are annotations with notes."""
-        labels = r"|".join(self.annotations.config.labels)
-        pattern = rf"^({labels})\b\S+"
-        return text.str.match(pattern, case=False)
-
-    def find_problems(self) -> Self:
-        """Find problematic annotations."""
-        data = self.annotations.data[self.annotations.annotator_cols]
-        mask = pd.Series(False, index=data.index)
-        for acol in data.columns:
-            mask |= self.is_note(data[acol])
-        mask |= data.apply("nunique", axis=1) > 1
-        problems = self.annotations.data[mask].reset_index(drop=True)
-        scores = (
-            problems[self.annotations.annotator_cols]
-            .apply(lambda s: Counter(s.dropna()), axis=1)
-            .pipe(pd.Series)
-            .map(entropy)
-        )
-        if (col := "score") not in problems:
-            idx = problems.columns.tolist().index(self.annotations.annotator_cols[-1]) + 1
-            problems.insert(idx, col, scores)
-        self.problems = problems.sort_values("score", ascending=False)
-        return self
-
-    def write(self, *args: Any, **kwargs: Any) -> None:
-        """Write Excel sheet with problematic example."""
-        if self.problems is None:
-            self.find_problems()
-        annotations = Annotations(
-            config=self.annotations.config,
-            data=self.problems,
-        )
-        annotations.write(*args, **kwargs)
 
 
 class InterCoderAgreement:
