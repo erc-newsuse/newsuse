@@ -1,5 +1,5 @@
 from collections.abc import Callable, Mapping
-from typing import Any, Literal, Self
+from typing import Any, Literal, NoReturn, Self
 
 import torch
 from transformers import (
@@ -21,6 +21,11 @@ _ProblemT = Literal[
     "regression", "single_label_classification", "multi_label_classification"
 ]
 _LossFuncT = Callable[[torch.Tensor, torch.Tensor, torch.Tensor | None], torch.Tensor]
+
+
+def _raise_unsupported_model(model: str) -> NoReturn:
+    errmsg = f"'{model}' model type is not supported"
+    raise ValueError(errmsg)
 
 
 class SequenceClassifierTransformerConfig(PretrainedConfig):
@@ -59,15 +64,25 @@ class SequenceClassifierTransformerConfig(PretrainedConfig):
             base = AutoConfig.from_pretrained(base_name_or_path, **(base or {}))
         self.base = base
 
-        if isinstance(head, SequenceClassificationHeadConfig):
-            head.dim = self.base.dim
-        elif self.base:
-            head = dict(head or {})
-            head["dim"] = self.base.dim
-            head["dropout"] = head.get("dropout", self.base.seq_classif_dropout)
-            head["initializer_range"] = head.get(
-                "initializer_range", self.base.initializer_range
-            )
+        if self.base:
+            if self.base.model_type == "distilbert":
+                base_dim = self.base.dim
+                dropout = self.base.seq_classif_dropout
+            elif self.base.model_type == "bert":
+                base_dim = self.base.hidden_size
+                dropout = self.base.classifier_dropout or 0.2
+            else:
+                _raise_unsupported_model(self.base.model_type)
+
+            if isinstance(head, SequenceClassificationHeadConfig):
+                head.dim = base_dim
+            else:
+                head = dict(head or {})
+                head["dim"] = base_dim
+                head["dropout"] = head.get("dropout", dropout)
+                head["initializer_range"] = head.get(
+                    "initializer_range", self.base.initializer_range
+                )
         head = SequenceClassificationHeadConfig(**(head or {}))
         self.head = head
         super().__init__(**kwargs)
@@ -140,8 +155,13 @@ class SequenceClassifierTransformer(PreTrainedModel):
         )
 
     def _get_pooled_output(self, output: BaseModelOutput) -> torch.Tensor:
-        hidden_states = output[0]
-        pooled_output = hidden_states[:, 0]
+        if self.config.base.model_type == "distilbert":
+            hidden_states = output[0]
+            pooled_output = hidden_states[:, 0]
+        elif self.config.base.model_type == "bert":
+            pooled_output = output.pooler_output
+        else:
+            _raise_unsupported_model(self.config.base.model_type)
         return pooled_output
 
     def get_tokenizer(self) -> PreTrainedTokenizer:

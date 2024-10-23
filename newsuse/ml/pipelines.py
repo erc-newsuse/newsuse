@@ -1,7 +1,9 @@
 from collections.abc import Mapping
-from functools import wraps
+from functools import singledispatchmethod, wraps
 from typing import Any
 
+import datasets
+import pandas as pd
 import torch
 import transformers
 from tqdm.auto import tqdm
@@ -37,6 +39,7 @@ class TextClassificationPipeline(transformers.TextClassificationPipeline):
     transformers.pipelines.TextClassificationPipeline : Parent pipeline class.
     """
 
+    @singledispatchmethod
     def __call__(
         self,
         inputs,
@@ -53,9 +56,28 @@ class TextClassificationPipeline(transformers.TextClassificationPipeline):
             tqdm_kwargs["total"] = len(inputs)
         except TypeError:
             pass
-        inputs = KeyDataset(inputs, key) if key else SimpleDataset(inputs)
+        if not isinstance(inputs, torch.utils.data.Dataset):
+            inputs = KeyDataset(inputs, key) if key else SimpleDataset(inputs)
         outputs = tqdm(super().__call__(inputs, **kwargs), **tqdm_kwargs)
         return list(outputs)
+
+    @__call__.register
+    def _(
+        self, inputs: datasets.Dataset, key: str = "text", *args: Any, **kwargs: Any
+    ) -> _OutputT | list[_OutputT]:
+        dataset = KeyDataset(inputs, key)
+        return self.__call__(dataset, *args, **kwargs)
+
+    @__call__.register
+    def _(
+        self,
+        inputs: pd.DataFrame,
+        key: str = "text",
+        *args: Any,
+        **kwargs: Any,
+    ) -> _OutputT | list[_OutputT]:
+        dataset = KeyDataset(inputs, key)
+        return self.__call__(dataset, *args, **kwargs)
 
     def postprocess(self, *args: Any, **kwargs: Any) -> dict[str, float]:
         outputs = super().postprocess(*args, **kwargs)

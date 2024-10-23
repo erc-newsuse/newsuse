@@ -7,7 +7,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from newsuse.types import PathLike
 
-from .trainer import TrainingMixin
+from ..trainer import TrainingMixin
 
 __all__ = ("AutoModelForSequenceClassification",)
 

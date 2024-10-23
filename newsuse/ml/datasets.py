@@ -101,6 +101,12 @@ class DatasetDict(datasets.DatasetDict):
             }
         )
 
+    def stack(self, *splits: str) -> "Dataset":
+        dataset = datasets.concatenate_datasets(
+            [v for k, v in self.items() if not splits or k in splits]
+        )
+        return Dataset.from_dataset(dataset)
+
 
 class Dataset(datasets.Dataset):
     @classmethod
@@ -341,7 +347,10 @@ class Dataset(datasets.Dataset):
         df = self.to_pandas()
         if not isinstance(df, pd.DataFrame):
             df = pd.concat(list(df), axis=0, ignore_index=True)
-        df["weight"] = w.loc[df[list(fields)].apply(tuple, axis=1)].reset_index(drop=True)
+        idx = df[list(fields)]
+        idx = idx.apply(tuple, axis=1) if len(fields) > 1 else idx[fields[0]]
+        idx.reset_index(drop=True, inplace=True)
+        df["weight"] = w.loc[idx].to_numpy()
         df["weight"] *= len(df) / df["weight"].sum()
         return self.__class__.from_pandas(df)
 

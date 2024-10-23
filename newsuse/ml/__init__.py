@@ -7,10 +7,10 @@ from transformers import (
     DataCollator,
     DataCollatorWithPadding,
     Pipeline,
-    TrainingArguments,
 )
 
 from .datasets import Dataset, DatasetDict, KeyDataset, SimpleDataset
+from .evaluation import Evaluation, Evaluator
 from .models import (
     AutoModelForSequenceClassification,
     FeedForwardNetwork,
@@ -19,5 +19,5 @@ from .models import (
     SequenceClassifierTransformerConfig,
     SetFitModel,
 )
-from .performance import Performance
 from .pipelines import TextClassificationPipeline, pipeline
+from .trainer import Trainer, TrainingArguments

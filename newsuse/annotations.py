@@ -28,13 +28,11 @@ class Annotations:
         self,
         config: Config,
         data: pd.DataFrame | None = None,
-        labels: pd.DataFrame | None = None,
         *,
         sampler: np.random.Generator | None = None,
         metadata: str | Iterable[str] = (),
     ) -> None:
         self.data = data
-        self.labels = labels
         self.config = Config(self.default_config.merge(config))
         self._metadata = tuple(metadata)
         self._sampler = sampler
@@ -75,6 +73,8 @@ class Annotations:
     def _handle_cols(self, data: pd.DataFrame) -> pd.DataFrame:
         acols = self.get_annotator_cols(data)
         first = ["key"]
+        if "source" in data:
+            first.append("source")
         if self.config.sheet_index_name:
             first.append(self.config.sheet_index_name)
         front = [*first, *self.metadata, *acols]
@@ -136,9 +136,6 @@ class Annotations:
                 del data[col]
 
         self.data = DataFrame(data)
-        if self.active_learning:
-            labels = {} if self.labels is None else {"labels": self.labels}
-            self.with_labels(**labels)
         self.data = self.data.convert_dtypes()
         return self
 
@@ -358,12 +355,7 @@ class Annotations:
         file = target.CreateFile({"id": id})
         self.write(file, **kwargs)
 
-    def with_labels(
-        self,
-        *,
-        __validate_uniqueness: bool = True,
-        **labels: pd.DataFrame,
-    ) -> Self:
+    def with_labels(self) -> Self:
         """Get annotations data frame with human and possibly some external labels.
 
         Final ``"label"`` column is built by coalescing label columns
@@ -386,25 +378,8 @@ class Annotations:
         for acol in acols:
             data[acol] = self.remove_notes(data[acol]).convert_dtypes()
         human = data[acols].mode(axis=1, dropna=True, sort_values=False)[0]
+
         data["human"] = human.to_numpy()
-
-        nrows = len(data)
-        for name, df in labels.items():
-            key = self.get_key(df)
-            rename = {key: "key", "label": name}
-            if (col := "score") in df:
-                rename[col] = f"{name}_{col}"
-            df.rename(columns=rename, inplace=True)
-            data = data.merge(df, how="left", on="key")
-
-        if __validate_uniqueness and len(data) != data["key"].nunique() == nrows:
-            errmsg = "there are duplicated records after joining with external labels"
-            raise ValueError(errmsg)
-
-        if labels and (col := "label") not in data:
-            data[col] = pd.NA
-        for label in labels:
-            data["label"] = data["label"].combine_first(label)
 
         self.data["human"] = data["human"].copy()
         self.data["correct"] = np.where(
@@ -417,14 +392,19 @@ class Annotations:
         self.data = self.data.convert_dtypes()
         return self
 
-    def update_columns(self, data: pd.DataFrame, *columns: str) -> Self:
+    def update_columns(self, data: pd.DataFrame, *columns: str, **rename: str) -> Self:
         """Update values in ``*columns`` using new ``data``."""
         key = self.get_key(data)
-        remap = {key: "key", **{c: f"{c}_new" for c in columns}}
-        data = data[list(remap)].rename(columns=remap)
-        ann = self.data.merge(data, how="left", on="key")
-        for col in columns:
-            ann[col] = ann.pop(f"{col}_new").combine_first(ann.pop(col))
+        remap = {key: "key"}
+        for new_name, name in rename.items():
+            remap[name] = f"{new_name}"
+            columns = (*columns, name)
+        data = data[["key", *columns]].rename(columns=remap)
+        ann = self.data.merge(data, how="left", on="key", suffixes=["", "_new"])
+        for col in [*columns, *rename]:
+            col_new = f"{col}_new"
+            if col in ann and col_new in ann:
+                ann[col] = ann.pop(col_new).combine_first(ann[col])
         self.data = ann
         return self
 
