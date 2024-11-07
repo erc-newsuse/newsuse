@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping
 from functools import singledispatchmethod
 from math import ceil
 from pathlib import Path
@@ -8,18 +8,17 @@ from typing import Any, Self
 import datasets
 import numpy as np
 import pandas as pd
-import torch
-import torch.utils
-import torch.utils.data
 from datasets import load_from_disk
 from datasets.features import Features
-from transformers.pipelines.pt_utils import KeyDataset as _KeyDataset
 
 from newsuse.annotations import Annotations
 from newsuse.types import PathLike
-from newsuse.utils import inthash
+from newsuse.utils import hashseed, inthash
 
-__all__ = ("Dataset", "DatasetDict", "SimpleDataset", "KeyDataset")
+__all__ = (
+    "Dataset",
+    "DatasetDict",
+)
 
 
 class DatasetDict(datasets.DatasetDict):
@@ -64,7 +63,12 @@ class DatasetDict(datasets.DatasetDict):
         return self.__class__(super().map(*args, **kwargs))
 
     def class_encode_column(self, *args: Any, **kwargs) -> Self:
-        return self.__class__(super().class_encode_columns(*args, **kwargs))
+        return self.__class__(
+            {
+                name: split.class_encode_column(*args, **kwargs)
+                for name, split in self.items()
+            }
+        )
 
     def rename_column(self, *args: Any, **kwargs: Any) -> Self:
         return self.__class__(super().rename_column(*args, **kwargs))
@@ -72,34 +76,20 @@ class DatasetDict(datasets.DatasetDict):
     def rename_columns(self, *args: Any, **kwargs: Any) -> Self:
         return self.__class__(super().rename_columns(*args, **kwargs))
 
+    def remove_columns(self, *args: Any, **kwargs: Any) -> Self:
+        return self.__class__(super().remove_columns(*args, **kwargs))
+
     def sample(
         self,
         size: int | float | Mapping[str, int | float],  # noqa
         *,
-        seed: int | np.random.Generator | None = None,
-        hash_key: str = "key",
+        seed: int | None = None,
         **kwargs: Any,
     ) -> Self:
-        if not isinstance(seed, np.random.Generator):
-            if hash_key and hash_key in self.column_names:
-                seed = seed or 0
-                seed += inthash(tuple(self[hash_key]))
-            rng = np.random.default_rng(seed)
-        else:
-            rng = seed
         if not isinstance(size, Mapping):
             size = {n: size for n in self}
-        dsets = {self[n].sample(s, seed=rng, **kwargs) for n, s in size.items()}
+        dsets = {self[n].sample(s, seed=seed, **kwargs) for n, s in size.items()}
         return self.__class__(dsets)
-
-    def select_training_columns(self, *args: Any, **kwargs: Any) -> Self:
-        """Select columns for training."""
-        return self.__class__(
-            {
-                name: split.select_training_columns(*args, **kwargs)
-                for name, split in self.items()
-            }
-        )
 
     def stack(self, *splits: str) -> "Dataset":
         dataset = datasets.concatenate_datasets(
@@ -107,8 +97,48 @@ class DatasetDict(datasets.DatasetDict):
         )
         return Dataset.from_dataset(dataset)
 
+    def update_data(
+        self,
+        data: pd.DataFrame | datasets.Dataset | datasets.DatasetDict,
+        splits: Mapping[str, float | int],
+        *,
+        key: str = "key",
+        allow_data_loss: bool = False,
+        **kwargs: Any,
+    ) -> Self:
+        """Update dataset splits from ``data``."""
+        keys = []
+        dct = {}
+        for name, split in self.items():
+            _data = data[name] if isinstance(data, datasets.DatasetDict) else data
+            dct[name] = split.update_data(_data, key=key, allow_data_loss=allow_data_loss)
+            keys.extend(self[name][key])
+        if isinstance(data, pd.DataFrame):
+            data = Dataset.from_pandas(data)
+        elif isinstance(data, datasets.DatasetDict):
+            data = datasets.concatenate_datasets(list(data.values()))
+        idx = np.where(~pd.Series(data["key"]).isin(keys))[0]
+        new_splits = data.select(idx).make_splits(splits, **kwargs)
+        for name, split in new_splits.items():
+            if name in dct:
+                dct[name] = dct[name].concat(split) if name in self else split
+        return self.__class__(dct)
+
+    def add_balancing_weights(self, *args: Any, **kwargs: Any) -> Self:
+        data = self.stack().add_balancing_weights(*args, **kwargs)
+        start = 0
+        dct = {}
+        for split, shape in self.shape.items():
+            nrows, *_ = shape
+            dct[split] = data.select(range(start, start + nrows))
+            start += nrows
+        return self.__class__(dct)
+
 
 class Dataset(datasets.Dataset):
+    def get_seed(self, seed: int | None = None) -> int:
+        return hashseed(tuple(self["key"]), seed)
+
     @classmethod
     def from_annotations(
         cls,
@@ -131,7 +161,7 @@ class Dataset(datasets.Dataset):
         data = annotations.data
 
         if top_n:
-            seed = (seed + inthash(data["key"])) % (2**32 - 1)
+            seed = hashseed(data["key"], seed)
             n_annotations = data[annotations.annotator_cols].notnull().sum(axis=1)
             data = (
                 data.assign(n_annotations=n_annotations)
@@ -140,6 +170,7 @@ class Dataset(datasets.Dataset):
                 .sort_values("n_annotations", ascending=False)
                 .head(top_n)
                 .reset_index(drop=True)
+                .drop(columns="n_annotations")
             )
 
         if isinstance(metadata, str):
@@ -155,46 +186,42 @@ class Dataset(datasets.Dataset):
         return cls.from_dataset(dataset)
 
     def train_test_split(self, *args: Any, **kwargs: Any) -> Self:
-        seed = kwargs.pop("seed", None)
-        if "key" in self.column_names:
-            seed = seed or 0
-            seed += inthash(tuple(self["key"]))
-        return super().train_test_split(*args, seed=seed, **kwargs)
+        kwargs["seed"] = self.get_seed(kwargs.get("seed"))
+        return super().train_test_split(*args, **kwargs)
 
     @singledispatchmethod
     def make_splits(
         self,
-        split: Mapping[str, float | int],
+        splits: Mapping[str, float | int],
         *,
         seed: int | None = None,
-        default_split_name: str = "train",
+        main_split: str = "train",
         **kwargs: Any,
     ) -> DatasetDict[str, Self]:
         """Split dataset."""
-        split = dict(split)
+        splits = dict(splits)
         n_examples = len(self)
 
-        for k, v in split.items():
+        for k, v in splits.items():
             if isinstance(v, float):
-                split[k] = int(ceil(v * n_examples))
+                splits[k] = int(ceil(v * n_examples))
 
-        n_in_split = sum(split.values())
+        n_in_split = sum(splits.values())
         if n_in_split > n_examples:
             errmsg = "cannot define splits with more examples than the size of the dataset"
             raise ValueError(errmsg)
         if n_in_split < n_examples:
-            if default_split_name in split:
-                errmsg = f"default split name '{default_split_name}' is already defined"
+            if main_split in splits:
+                errmsg = f"default split name '{main_split}' is already defined"
                 raise ValueError(errmsg)
-            split[default_split_name] = n_examples - n_in_split
+            splits[main_split] = n_examples - n_in_split
 
-        seed = seed or 0
-        seed += inthash(tuple(self["key"]))
+        seed = self.get_seed(seed)
         kwargs = {"seed": seed, "keep_in_memory": True, **kwargs}
         data = self.shuffle(**kwargs)
         dset = {}
         start = 0
-        for name, n in split.items():
+        for name, n in splits.items():
             dset[name] = data.select(range(start, start + n), keep_in_memory=True)
             start += n
         return DatasetDict(dset)
@@ -206,8 +233,15 @@ class Dataset(datasets.Dataset):
         dct = dict([split, *splits])
         return self.split(dct, **kwargs)
 
-    def concat(self, *others: Self, **kwargs: Any) -> Self:
-        dataset = datasets.concatenate_datasets([self, *others], **kwargs)
+    def shuffle(self, *args: Any, **kwargs: Any) -> Self:
+        kwargs["seed"] = self.get_seed(kwargs.get("seed"))
+        return super().shuffle(*args, **kwargs)
+
+    def concat(self, *others: datasets.Dataset | pd.DataFrame, **kwargs: Any) -> Self:
+        _others = [
+            o if isinstance(o, datasets.Dataset) else self.from_pandas(o) for o in others
+        ]
+        dataset = datasets.concatenate_datasets([self, *_others], **kwargs)
         return self.from_dataset(dataset)
 
     def save_to_disk(
@@ -280,27 +314,35 @@ class Dataset(datasets.Dataset):
     def rename_columns(self, *args: Any, **kwargs: Any) -> Self:
         return self.from_dataset(super().rename_columns(*args, **kwargs))
 
+    def remove_columns(self, *args: Any, **kwargs: Any) -> Self:
+        return self.from_dataset(super().remove_columns(*args, **kwargs))
+
     def class_encode_column(
         self, column: str, names: Iterable[str] | None = None, *args: Any, **kwargs: Any
     ) -> Self:
+        names = list(names or [])
+
+        if isinstance(self.features[column], datasets.ClassLabel):
+            dataset = self.from_dataset(self)
+            if names:
+                dataset.info.features[column].names = names  # type: ignore
+            return dataset
+
         dataset = super().class_encode_column(column, *args, **kwargs)
+        schema = dataset.info.features[column]  # type: ignore
         if names:
-            names = list(names)
-            if set(names) != set(dataset.features[column].names):
-                errmsg = "labels schema is not consistent with observed labels"
-                raise ValueError(errmsg)
-            map_old = dict(enumerate(dataset.features[column].names))
-            map_new = {label: id for id, label in enumerate(names)}
+            if schema.names == [str(i) for i in range(len(names))]:
+                schema.names = names
+            else:
+                label2id = {n: i for i, n in enumerate(dataset.features[column].names)}
+                remap = {label2id[n]: i for i, n in enumerate(names)}
 
-            def remap(example):
-                if not (value := example.get(column)):
-                    return example
-                example = example.copy()
-                example[column] = map_new[map_old[value]]
-                return example
+                def do_remap(d):
+                    d[column] = remap[d[column]]
+                    return d
 
-            dataset = dataset.map(remap)
-            dataset.info.features[column].names = names  # type: ignore
+                dataset = dataset.map(do_remap)
+                dataset.info.features[column].names = names  # type: ignore
         return self.from_dataset(dataset)
 
     @singledispatchmethod
@@ -339,90 +381,49 @@ class Dataset(datasets.Dataset):
         size = int(ceil(len(self)))
         return self.sample(size, **kwargs)
 
-    def add_balancing_weights(self, *fields: str) -> Self:
+    def add_balancing_weights(
+        self, *fields: str, weight_field_name: str = "weight"
+    ) -> Self:
         """Add weights balancing examples in groups given by ``*field``."""
-        n = self.to_pandas().groupby(list(fields)).size()
-        target = len(self) / len(n)
-        w = target / n
         df = self.to_pandas()
         if not isinstance(df, pd.DataFrame):
             df = pd.concat(list(df), axis=0, ignore_index=True)
+        n = df.groupby(list(fields)).size()
+        target = len(self) / len(n)
+        w = target / n
         idx = df[list(fields)]
         idx = idx.apply(tuple, axis=1) if len(fields) > 1 else idx[fields[0]]
         idx.reset_index(drop=True, inplace=True)
-        df["weight"] = w.loc[idx].to_numpy()
-        df["weight"] *= len(df) / df["weight"].sum()
-        return self.__class__.from_pandas(df)
+        df[weight_field_name] = w.loc[idx].to_numpy()
+        df[weight_field_name] *= len(df) / df[weight_field_name].sum()
+        dataset = self.__class__.from_pandas(df)
+        info = self.info.copy()
+        info.features[weight_field_name] = dataset.features[weight_field_name]  # type: ignore
+        return dataset.update_info(info)
 
-    def select_training_columns(
-        self, *optional_cols: str, data: str = "text", target: str = "label"
+    def update_data(
+        self,
+        data: pd.DataFrame | datasets.Dataset,
+        *,
+        key: str = "key",
+        allow_data_loss: bool = False,
+        **kwargs: Any,
     ) -> Self:
-        """Select columns for training."""
-        usecols = [data, target]
-        usecols.extend(c for c in optional_cols if c in self.column_names)
-        return self.select_columns(usecols)
+        """Update current data with new values from ``data``."""
+        if isinstance(data, datasets.Dataset):
+            _data = data.to_pandas()
+            if not isinstance(_data, pd.DataFrame):
+                kwargs = {"axis": 0, "ignore_index": True, **kwargs}
+                _data = pd.concat(list(_data), **kwargs)
+            data = _data
+        mask = data[key].isin(self[key])
+        data = data.loc[mask, self.column_names].reset_index(drop=True)
+        if not allow_data_loss and (n_missing := len(self) - len(data)) > 0:
+            errmsg = f"incoming data is missing {n_missing} examples"
+            raise ValueError(errmsg)
+        dataset = self.from_pandas(data)
+        return dataset.update_info(self.info)
 
-
-class SimpleDataset(torch.utils.data.Dataset):
-    """Simple indexable :mod:`torch` dataset
-    fetching examples from elements of ``self.data``.
-
-    Examples
-    --------
-    >>> df = pd.DataFrame({"a": [1,2,3], "b": [1,2,3]})
-    >>> dataset = SimpleDataset(df)
-    >>> dataset[0]
-    {'a': 1, 'b': 1}
-    >>> dataset[:2]
-    {'a': [1, 2], 'b': [1, 2]}
-
-    It is compatible with :class:`newsuse.ml.KeyDaset`.
-
-    >>> keyed = KeyDataset(dataset, "a")
-    >>> keyed[0]
-    1
-    >>> keyed[:2]
-    [1, 2]
-    """
-
-    _ExampleT = dict[str, Any]
-
-    def __init__(
-        self, data: Sequence[_ExampleT] | Iterable[_ExampleT] | pd.DataFrame
-    ) -> None:
-        if not isinstance(data, Sequence | pd.DataFrame):
-            data = list(data)
-        self.data = data
-
-    def __len__(self) -> int:
-        return len(self.data)
-
-    def __getitem__(self, idx: int | slice) -> _ExampleT:
-        return self._get(self.data, idx)
-
-    @singledispatchmethod
-    def _get(self, data, idx: int) -> _ExampleT:
-        return data[idx]
-
-    @_get.register
-    def _(self, data: pd.Series, idx: int | slice) -> _ExampleT:
-        out = data.iloc[idx]
-        if isinstance(idx, slice):
-            out = out.tolist()
-        return out
-
-    @_get.register
-    def _(self, data: pd.DataFrame, idx: int | slice) -> _ExampleT:
-        out = data.iloc[idx]
-        if isinstance(idx, slice):
-            return out.to_dict(orient="list")
-        return out.to_dict()
-
-
-class KeyDataset(_KeyDataset):
-    def __init__(
-        self, dataset: torch.utils.data.Dataset | Sequence | pd.DataFrame, key: str
-    ) -> None:
-        if not isinstance(dataset, torch.utils.data.Dataset):
-            dataset = SimpleDataset(dataset)
-        super().__init__(dataset, key)
+    def update_info(self, info: datasets.DatasetInfo) -> Self:
+        """Update metadata based on ``dataset``."""
+        return self.__class__(self.data, info, self.split, self._indices, self._fingerprint)

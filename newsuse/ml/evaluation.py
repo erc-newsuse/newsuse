@@ -133,13 +133,13 @@ class Evaluator:
     pipeline
         Model pipeline for generating predictions.
     evaluation
-        Evaluation configuration.
+        Evaluation configuration or name of evaluation metric.
     """
 
     def __init__(
         self,
         pipeline: Pipeline,
-        evaluation: Evaluation | None = None,
+        evaluation: Evaluation | str | None = None,
         *,
         target_name: str | None = None,
         **kwargs: Any,
@@ -153,7 +153,11 @@ class Evaluator:
             Ignored otherwise.
         """
         self.pipeline = pipeline
-        self.evaluation = evaluation or Evaluation(**kwargs)
+        if evaluation is None:
+            evaluation = Evaluation(**kwargs)
+        elif isinstance(evaluation, str):
+            evaluation = Evaluation(evaluation, **kwargs)
+        self.evaluation = evaluation
         self.evaluate = self.evaluation.get_evaluation_function(self.pipeline)
         if not target_name:
             if isinstance(self.pipeline, TextClassificationPipeline):

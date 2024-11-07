@@ -1,4 +1,3 @@
-from .autoclasses import AutoModelForSequenceClassification
 from .classifiers.setfit import SetFitModel
 from .classifiers.transformer import (
     SequenceClassifierTransformer,

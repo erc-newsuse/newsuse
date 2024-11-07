@@ -1,4 +1,4 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from functools import singledispatch
 from inspect import Parameter, Signature, _empty, get_annotations, signature
 from typing import Any
@@ -6,10 +6,10 @@ from typing import Any
 import joblib
 import pydantic
 
-__all__ = ("inthash", "get_signature", "match_signature", "validate_call")
+__all__ = ("inthash", "hashseed", "get_signature", "match_signature", "validate_call")
 
 
-def inthash(x: Any, **kwargs: Any) -> int:
+def inthash(x: Hashable, **kwargs: Any) -> int:
     """Make deterministic integer hash from an object and add ``shift``.
 
     ``**kwargs`` are passed to :func:`joblib.hash`.
@@ -23,6 +23,23 @@ def inthash(x: Any, **kwargs: Any) -> int:
     False
     """
     return int(joblib.hash(x, **kwargs), base=16)
+
+
+def hashseed(
+    x,
+    seed: int | None = None,
+    wrap: int | None = 2**32 - 1,
+    **kwargs: Any,
+) -> int:
+    """Generate seed for random generation from object hash."""
+    seed = seed or 0
+    seed += inthash(x, **kwargs)
+    if seed < 0:
+        errmsg = "seed values must be non-negative"
+        raise ValueError(errmsg)
+    if wrap:
+        seed = seed % wrap
+    return seed
 
 
 @singledispatch

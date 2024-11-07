@@ -70,6 +70,15 @@ class Annotations:
             self._sampler = self.get_sampler()
         return self._sampler
 
+    def copy(self) -> Self:
+        new = self.__class__(
+            config=self.config,
+            data=self.data.copy(),
+            metadata=self._metadata,
+        )
+        new._aselect = self._aselect
+        return new
+
     def _handle_cols(self, data: pd.DataFrame) -> pd.DataFrame:
         acols = self.get_annotator_cols(data)
         first = ["key"]
@@ -472,7 +481,9 @@ class InterCoderAgreement:
 
     @validate_call
     def pairwise_consistency(self, which: _MarginT = "coders") -> pd.DataFrame:
-        return self.n_agree(which) / self.n_responses(which)
+        n_responses = self.n_responses(which)
+        n_responses[n_responses == 0] = pd.NA
+        return self.n_agree(which) / n_responses
 
     @classmethod
     def from_annotations(cls, annotations: Annotations) -> Self:
