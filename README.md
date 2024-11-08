@@ -22,9 +22,9 @@ pip install git+ssh://git@github.com/newsuse/newsuse.git@dev
 
 ```bash
 # Clone the repo
-git clone git+ssh://git@github.com/newsuse/newsuse.git
+git clone git+ssh://git@github.com/erc-newsuse/newsuse.git
 # Or from a specific branch, e.g. 'dev'
-git clone git+ssh://git@github.com/newsuse/newsuse.git@dev
+git clone git+ssh://git@github.com/erc-newsuse/newsuse.git@dev
 ```
 
 Configure the environment and install the package after cloning.
