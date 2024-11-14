@@ -1,5 +1,5 @@
 import io
-import re
+import warnings
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from functools import singledispatchmethod
@@ -353,7 +353,8 @@ class DataFrame(pd.DataFrame):
         """
         self.to_excel(*args, **kwargs)
 
-    def to_gdrive_file(self, target: GoogleDriveFile, *args: Any, **kwargs: Any) -> None:
+    @singledispatchmethod
+    def to_gdrive(self, target: GoogleDriveFile, *args: Any, **kwargs: Any) -> None:
         """Write to a :class:`pydrive2.files.GoogleDriveFile`.
 
         The file must define proper MIME type and file extension.
@@ -366,10 +367,11 @@ class DataFrame(pd.DataFrame):
         target.content = buffer
         target.Upload()
 
-    def to_gdrive(self, target: GoogleDrive, id: str, *args: Any, **kwargs: Any) -> None:
+    @to_gdrive.register
+    def _(self, target: GoogleDrive, id: str, *args: Any, **kwargs: Any) -> None:
         """Write to :class:`pydrive2.drives.GoogleDrive` file by ``id``."""
         file = target.CreateFile({"id": id})
-        self.to_gdrive_file(file, *args, **kwargs)
+        self.to_gdrive(file, *args, **kwargs)
 
     @staticmethod
     def check_gdrive_file(target: GoogleDriveFile) -> None:
@@ -385,7 +387,7 @@ class DataFrame(pd.DataFrame):
 
     @to_.register
     def _(self, target: GoogleDriveFile, *args: Any, **kwargs: Any) -> None:
-        self.to_gdrive_file(target, *args, **kwargs)
+        self.to_gdrive(target, *args, **kwargs)
 
     @to_.register
     def _(self, target: GoogleDrive, *args: Any, **kwargs: Any) -> None:
@@ -446,7 +448,7 @@ class DataFrame(pd.DataFrame):
     @from_.register
     @classmethod
     def _(cls, source: GoogleDriveFile, *args: Any, **kwargs: Any) -> Self:
-        return cls.from_gdrive_file(source, *args, **kwargs)
+        return cls.from_gdrive(source, *args, **kwargs)
 
     @from_.register
     @classmethod
@@ -593,90 +595,115 @@ class DataFrame(pd.DataFrame):
         """
         return cls(read_r(*args, **kwargs)[None]).convert_dtypes()
 
+    @singledispatchmethod
     @classmethod
-    def read_many(
-        cls,
-        *paths: PathLike,
-        key: str | None = None,
-        drop_before_key: bool = False,
-        read_opts: Mapping[str, Any] | None = None,
-        progress: Mapping[str, Any] | bool = False,
-        re_flags: int = 0,
-        re_ignorecase: bool = False,
-        **meta: str,
-    ) -> Iterator[Self]:
-        """Iterate over and read multiple data files.
-
-        Parameters
-        ----------
-        path
-            Path to file(s).
-            Multiple source files can be specified using GLOB patterns.
-        key
-            Name of the key column.
-        progress
-            Should the iterator be wrapped in progress bar.
-            Can be passed as bool or as a mapping with :func:`tqdm.tqdm` options.
-        drop_before_key
-            Should columns before the key column be dropped after reading.
-        re_flags, re_ignorecase
-            Options passed to :func:`re.compile`
-            used for extracting metadata from file names.
-        **meta
-            Names to regex pairings used for adding metadata columns to data frames.
-            Regular expression must Capture the metadata value in the first match group.
-        """
-        read_opts = read_opts or {}
-        if re_ignorecase:
-            re_flags |= re.IGNORECASE
-        meta_rx = {name: re.compile(pattern, re_flags) for name, pattern in meta.items()}
-
-        files = []
-        for path in map(Path, paths):
-            for file in path.parent.glob(path.name):
-                files.append(file)  # noqa
-
-        def _iter():
-            for file in files:
-                df = DataFrame.from_(file, **read_opts)
-                if key:
-                    if drop_before_key:
-                        df = df.loc[:, key:]
-                    df.insert(0, key, df.pop(key))
-                meta_pos = 1 if key else 0
-                for name, rx in reversed(meta_rx.items()):
-                    value = rx.match(file.name).group(1)
-                    df.insert(meta_pos, name, value)
-                df = cls(df).convert_dtypes()
-                yield df
-
-        if progress:
-            tqdm_kwargs = {} if isinstance(progress, bool) else progress
-            yield from tqdm(_iter(), **{"total": len(files), **tqdm_kwargs})
-        else:
-            yield from _iter()
-
-    @classmethod
-    def from_gdrive_file(cls, source: GoogleDriveFile, *args: Any, **kwargs: Any) -> Self:
+    def from_gdrive(cls, source: GoogleDriveFile, *args: Any, **kwargs: Any) -> Self:
         """Construct from :class:`GoogleDriveFile` instance.
 
         ``*args`` and ``**kwargs`` are passed to an appropriate format reader.
         """
-        if not source.metadata:
-            source.FetchMetadata()
-        reader = cls._get_reader(source["fileExtension"])
-        buffer = io.BytesIO(source.GetContentIOBuffer().read())
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            if not source.metadata:
+                source.FetchMetadata()
+            reader = cls._get_reader(source["fileExtension"])
+            buffer = io.BytesIO(source.GetContentIOBuffer().read())
         return reader(buffer, *args, **kwargs)
 
+    @from_gdrive.register
     @classmethod
-    def from_gdrive(cls, source: GoogleDrive, id: str, *args: Any, **kwargs: Any) -> Self:
+    def _(cls, source: GoogleDrive, id: str, *args: Any, **kwargs: Any) -> Self:
         """Construct from :class:`GoogleDrive`.
 
         ``id`` is the Google Drive file id.
         ``*args`` and ``*kwargs`` are passed to an appropriate format reader.
         """
-        file = source.CreateFile({"id": id})
-        return cls.from_gdrive_file(file, *args, **kwargs)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            file = source.CreateFile({"id": id})
+        return cls.from_gdrive(file, *args, **kwargs)
 
     def mode(self, axis, **kwargs: Any) -> pd.DataFrame:
         return self.apply(Series.mode, axis=axis, **kwargs)
+
+    @classmethod
+    def iter_sources(cls, *sources: Any) -> Iterator[Any]:
+        """Iterate over glob-expanded ``*sources``.
+
+        Parameters
+        ----------
+        *sources
+            Data sources of any supported type.
+            Path-like sources with glob patterns will be expanded.
+        """
+        for source in sources:
+            if isinstance(source, str | Path):
+                source = Path(source)
+                if source.is_absolute():
+                    _sources = Path("/").glob(str(source)[1:])
+                else:
+                    _sources = Path.cwd().glob(str(sources))
+            else:
+                _sources = [source]
+            yield from _sources
+
+    @classmethod
+    def read_many(
+        cls,
+        *sources: Any,
+        progress: Mapping[str, Any] | bool = False,
+    ) -> Iterator[tuple[Any, Self]]:
+        """Iterate over and read multiple data files.
+
+        Parameters
+        ----------
+        *sources
+            Data sources of any supported type.
+            Tuples and mappings are interpreted as ``*args`` and ``*kwargs`` respectively.
+            Path-like sources may inclue glob patterns.
+            In all cases sources will be read using :meth:`from_` method.
+        progress
+            Should the iterator be wrapped in progress bar.
+            Can be passed as bool or as a mapping with :func:`tqdm.tqdm` options.
+
+        Yields
+        ------
+        source
+            Expanded source.
+        df
+            Data frame read from the ``source``.
+        """
+        _sources = list(cls.iter_sources(*sources))
+
+        def _iter():
+            for source in _sources:
+                if isinstance(source, tuple):
+                    yield source, cls.from_(*source)
+                elif isinstance(source, Mapping):
+                    yield source, cls.from_(**source)
+                else:
+                    yield source, cls.from_(source)
+
+        data = _iter()
+        if progress:
+            tqdm_kwargs = {} if isinstance(progress, bool) else progress
+            data = tqdm(data, **{"total": len(_sources), **tqdm_kwargs})
+        yield from data
+
+    @classmethod
+    def from_many(
+        cls,
+        *sources: Any,
+        progress: Mapping[str, Any] | bool = False,
+        **kwargs: Any,
+    ) -> Self:
+        """Build data frame from many sources.
+
+        See :meth:`read_many` for details.
+        Additional ``**kwargs`` are passed to :func:`pandas.concat`
+        (by default ``axis=0`` and ``ignore_index=True`` are used).
+        """
+        kwargs = {"axis": 0, "ignore_index": True, **kwargs}
+        return pd.concat(
+            (df for _, df in cls.read_many(*sources, progress=progress)), **kwargs
+        )

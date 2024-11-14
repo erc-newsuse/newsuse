@@ -1,4 +1,5 @@
 import io
+import warnings
 from collections.abc import Hashable, Iterable, Sequence
 from functools import singledispatchmethod
 from typing import Any, Literal, Self
@@ -157,11 +158,13 @@ class Annotations:
     @read.register
     def _(self, source: GoogleDriveFile, **kwargs: Any) -> Self:
         if not source.metadata:
-            source.FetchMetadata()
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning)
+                source.FetchMetadata()
         if (ext := source["fileExtension"]) != "xlsx":
             errmsg = f"cannot read annotations in '.{ext}' format"
             raise ValueError(errmsg)
-        sheets = DataFrame.from_gdrive_file(source, sheet_name=None, **kwargs)
+        sheets = DataFrame.from_gdrive(source, sheet_name=None, **kwargs)
         return self._process_after_read(sheets, **kwargs)
 
     @read.register
@@ -299,7 +302,7 @@ class Annotations:
         if groups is None:
             self.data = shuffle(self.data)
         else:
-            self.data = self.data.groupby(groups).apply(shuffle)
+            self.data = self.data.groupby(groups).apply(shuffle, include_groups=True)
         self.data.reset_index(drop=True, inplace=True)
 
         return self

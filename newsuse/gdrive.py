@@ -1,4 +1,5 @@
 import os
+import warnings
 from pathlib import Path
 
 from pydrive2.auth import GoogleAuth
@@ -23,7 +24,9 @@ def connect(
         "client_config_backend": "service",
         "service_config": {"client_json_file_path": str(Path(path).absolute())},
     }
-    auth = GoogleAuth(settings=settings)
-    auth.ServiceAuth()
-    drive = GoogleDrive(auth)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        auth = GoogleAuth(settings=settings)
+        auth.ServiceAuth()
+        drive = GoogleDrive(auth)
     return drive
