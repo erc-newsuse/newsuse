@@ -370,14 +370,18 @@ class DataFrame(pd.DataFrame):
     @to_gdrive.register
     def _(self, target: GoogleDrive, id: str, *args: Any, **kwargs: Any) -> None:
         """Write to :class:`pydrive2.drives.GoogleDrive` file by ``id``."""
-        file = target.CreateFile({"id": id})
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            file = target.CreateFile({"id": id})
         self.to_gdrive(file, *args, **kwargs)
 
     @staticmethod
     def check_gdrive_file(target: GoogleDriveFile) -> None:
         """Check if a :class:`pydrive2.files.GoogleDriveFile` defines MIME and extension."""
         if not target.metadata:
-            target.FetchMetadata()
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning)
+                target.FetchMetadata()
         if not target.get("mimeType"):
             errmsg = "'target' file must define MIME type"
             raise ValueError(errmsg)

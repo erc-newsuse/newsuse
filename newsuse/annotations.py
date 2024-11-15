@@ -302,7 +302,9 @@ class Annotations:
         if groups is None:
             self.data = shuffle(self.data)
         else:
-            self.data = self.data.groupby(groups).apply(shuffle, include_groups=True)
+            self.data = self.data.groupby(groups)[self.data.columns].apply(
+                shuffle, include_groups=True
+            )
         self.data.reset_index(drop=True, inplace=True)
 
         return self
@@ -360,11 +362,15 @@ class Annotations:
         buffer = io.BytesIO()
         self.write(buffer, **kwargs)
         target.content = buffer
-        target.Upload()
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            target.Upload()
 
     @write.register
     def _(self, target: GoogleDrive, id: str, **kwargs: Any) -> None:
-        file = target.CreateFile({"id": id})
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            file = target.CreateFile({"id": id})
         self.write(file, **kwargs)
 
     def with_labels(self) -> Self:
@@ -480,7 +486,15 @@ class InterCoderAgreement:
 
     @validate_call
     def consistency(self, which: _MarginT = "coders") -> float:
-        return self.n_agree(which).sum().sum() / self.n_responses(which).sum().sum()
+        agree = self.n_agree(which)
+        responses = self.n_responses(which)
+        n_agree = 0
+        n_responses = 0
+        for i in range(len(self.coders)):
+            for j in range(i):
+                n_agree += agree.iloc[i, j]
+                n_responses += responses.iloc[i, j]
+        return n_agree / n_responses
 
     @validate_call
     def pairwise_consistency(self, which: _MarginT = "coders") -> pd.DataFrame:
