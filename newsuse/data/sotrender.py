@@ -73,11 +73,21 @@ def read_data(
         subset="key", ignore_index=True
     )
 
+    def parse_date(s: str) -> date:
+        return pd.NaT if pd.isnull(s) else date.fromisoformat(s)
+
+    def parse_time(s: str) -> time:
+        if pd.isnull(s):
+            return pd.NaT
+        if s[1] == ":":
+            s = "0" + s
+        return time.fromisoformat(s)
+
     if (col := "date") in data and pd.api.types.is_string_dtype(data[col]):
-        data[col] = data[col].map(date.fromisoformat)
+        data[col] = data[col].map(parse_date)
     if (col := "hour") in data:
         if pd.api.types.is_string_dtype(data[col]):
-            data[col] = data[col].map(time.fromisoformat)
+            data[col] = data[col].map(parse_time)
         elif pd.api.types.is_numeric_dtype(data[col]):
             data[col] = data[col].map(lambda t: pd.Timestamp(t * 1e9).time())
 
@@ -135,7 +145,7 @@ def normalize_text_content(
         if val not in nan_remap:
             nan_remap[val] = pd.NA
 
-    snippet_cols = list(snippet_cols)
+    snippet_cols = [c for c in snippet_cols if c in data]
     text_cols = [content_col, *snippet_cols]
     for col in text_cols:
         data[col] = data[col].str.strip()

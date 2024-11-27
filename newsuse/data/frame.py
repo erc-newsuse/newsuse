@@ -365,7 +365,9 @@ class DataFrame(pd.DataFrame):
         buffer = io.BytesIO()
         writer(buffer, *args, **kwargs)
         target.content = buffer
-        target.Upload()
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            target.Upload()
 
     @to_gdrive.register
     def _(self, target: GoogleDrive, id: str, *args: Any, **kwargs: Any) -> None:
@@ -378,16 +380,16 @@ class DataFrame(pd.DataFrame):
     @staticmethod
     def check_gdrive_file(target: GoogleDriveFile) -> None:
         """Check if a :class:`pydrive2.files.GoogleDriveFile` defines MIME and extension."""
-        if not target.metadata:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            if not target.metadata:
                 target.FetchMetadata()
-        if not target.get("mimeType"):
-            errmsg = "'target' file must define MIME type"
-            raise ValueError(errmsg)
-        if not target.get("fileExtension"):
-            errmsg = "'target' file must define file extension"
-            raise ValueError(errmsg)
+            if not target.get("mimeType"):
+                errmsg = "'target' file must define MIME type"
+                raise ValueError(errmsg)
+            if not target.get("fileExtension"):
+                errmsg = "'target' file must define file extension"
+                raise ValueError(errmsg)
 
     @to_.register
     def _(self, target: GoogleDriveFile, *args: Any, **kwargs: Any) -> None:
@@ -646,7 +648,7 @@ class DataFrame(pd.DataFrame):
                 if source.is_absolute():
                     _sources = Path("/").glob(str(source)[1:])
                 else:
-                    _sources = Path.cwd().glob(str(sources))
+                    _sources = Path.cwd().glob(str(source))
             else:
                 _sources = [source]
             yield from _sources

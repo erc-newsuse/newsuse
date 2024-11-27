@@ -63,24 +63,6 @@ class Paths(Namespace):
             path = self.root / path
         return path
 
-    @classmethod
-    def from_config(cls, config: PathLike, *args: Any, **kwargs: Any) -> Self:
-        """Construct from a config file assuming that ``root`` is its parent directory.
-
-        Examples
-        --------
-        >>> from tempfile import mkdtemp
-        >>> temp = Path(mkdtemp())
-        >>> config = temp/"config.ini"
-        >>> paths = Paths.from_config(temp/config)
-        >>> paths.root == temp
-        True
-        >>> paths.config == config
-        True
-        """
-        config = Path(config)
-        return cls(config.parent, *args, config=config.name, **kwargs)
-
     def __copy__(self, **kwargs: PathLike) -> Self:
         """Make a copy with additional paths given by ``**kwargs``.
 

@@ -2,6 +2,7 @@ import io
 import warnings
 from collections.abc import Hashable, Iterable, Sequence
 from functools import singledispatchmethod
+from types import MappingProxyType
 from typing import Any, Literal, Self
 
 import numpy as np
@@ -23,7 +24,7 @@ class Annotations:
 
     data: DataFrame
     source: PathLike | None
-    default_config = Config({"key": None, "dtype_backend": "pyarrow"})
+    default_config = MappingProxyType({"key": None, "dtype_backend": "pyarrow"})
 
     def __init__(
         self,
@@ -34,7 +35,7 @@ class Annotations:
         metadata: str | Iterable[str] = (),
     ) -> None:
         self.data = data
-        self.config = Config(self.default_config.merge(config))
+        self.config = Config(self.default_config).merge(config)
         self._metadata = tuple(metadata)
         self._sampler = sampler
         self._aselect = None
@@ -234,9 +235,11 @@ class Annotations:
         if groups:
             data = data.groupby(groups)  # type: ignore
 
-        sample = data.sample(
-            n=n, replace=False, weights=weights, random_state=self.sampler
-        ).reset_index(drop=True)
+        sample = (
+            data.sort_values(by=key, ignore_index=True)
+            .sample(n=n, replace=False, weights=weights, random_state=self.sampler)
+            .reset_index(drop=True)
+        )
         sample.insert(0, "key", sample.pop(key))
 
         usecols = ["key", self.config.content_name]
@@ -275,11 +278,19 @@ class Annotations:
         print(msg)
         return self
 
-    def shuffle_empty(self, *, groups: Hashable | Sequence[Hashable] | None = None) -> Self:
+    @validate_call
+    def shuffle(
+        self,
+        which: Literal["all", "empty", "non-annotated", "annotated"],
+        *,
+        groups: Hashable | Sequence[Hashable] | None = None,
+    ) -> Self:
         """Shuffle examples without annotations, possibly in ``groups``."""
+        if which == "empty":
+            which = "non-annotated"
         acols = self.annotator_cols
 
-        msg = "Shuffling non-annotated examples"
+        msg = f"Shuffling {which} examples"
         if groups is not None:
             if isinstance(groups, str):
                 groups = [groups]
@@ -287,17 +298,28 @@ class Annotations:
         print(msg)
 
         def shuffle(df: pd.DataFrame) -> pd.DataFrame:
+            key = self.get_key(df)
+            df = df.sort_values(by=key, ignore_index=True)
             has_annotations = df[acols].notnull().any(axis=1)
             filled = df[has_annotations]
             empty = df[~has_annotations]
-            sampler = self.get_sampler(filled)
-            empty_shuffled = empty.sample(
-                frac=1,
-                replace=False,
-                random_state=sampler,
-                ignore_index=True,
-            )
-            return pd.concat([filled, empty_shuffled], axis=0, ignore_index=True)
+            if which in ("all", "non-annotated"):
+                sampler = self.get_sampler(filled)
+                empty = empty.sample(
+                    frac=1,
+                    replace=False,
+                    random_state=sampler,
+                    ignore_index=True,
+                )
+            if which in ("all", "annotated"):
+                sampler = self.get_sampler(filled)
+                filled = filled.sample(
+                    frac=1,
+                    replace=False,
+                    random_state=sampler,
+                    ignore_index=True,
+                )
+            return pd.concat([filled, empty], axis=0, ignore_index=True)
 
         if groups is None:
             self.data = shuffle(self.data)
@@ -358,12 +380,12 @@ class Annotations:
 
     @write.register
     def _(self, target: GoogleDriveFile, **kwargs: Any) -> None:
-        DataFrame.check_gdrive_file(target)
-        buffer = io.BytesIO()
-        self.write(buffer, **kwargs)
-        target.content = buffer
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=DeprecationWarning)
+            DataFrame.check_gdrive_file(target)
+            buffer = io.BytesIO()
+            self.write(buffer, **kwargs)
+            target.content = buffer
             target.Upload()
 
     @write.register

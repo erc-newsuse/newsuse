@@ -168,10 +168,14 @@ def dotimport(dotpath: str) -> Any:
     >>> dotimport("typing:Any:__name__")
     Traceback (most recent call last):
     ValueError: ...
+    >>> dotimport(":sum") is sum
+    True
     """
     if dotpath.count(":") > 1:
         errmsg = f"dot-path '{dotpath}' has more than one ':' separator"
         raise ValueError(errmsg)
+    if dotpath.startswith(":"):
+        dotpath = f"builtins:{dotpath}"
     module_spec, *obj_spec = dotpath.split(":")
     module = import_module(module_spec)
     if not obj_spec:

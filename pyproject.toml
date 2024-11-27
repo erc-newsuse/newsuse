@@ -16,6 +16,7 @@ license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "omegaconf>=2.3",
     "numpy>=1.26",
     "scipy>=1.13",
     "pyarrow>=16.1",
