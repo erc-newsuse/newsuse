@@ -110,7 +110,8 @@ def read_data(
         *[c for c in data.columns if c.startswith("reactions_")],
     ]
     for col in intcols:
-        data[col] = data[col].astype("int64[pyarrow]")
+        if col in data:
+            data[col] = data[col].astype("int64[pyarrow]")
 
     if (field := "content_type") not in data:
         data.insert(data.shape[1], field, "fb_post")
