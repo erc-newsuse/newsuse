@@ -77,4 +77,4 @@ class Paths(Namespace):
         """
         dct = dict(self.__dict__)
         root = dct.pop("root")
-        return self.__class__(root, **dct, **kwargs)
+        return self.__class__(root, **{**dct, **kwargs})
