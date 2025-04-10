@@ -41,6 +41,7 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 def read_data(
     *sources: PathLike,
     metadata: Mapping[str, str | re.Pattern] | None = None,
+    keycol: str = "fb_post_id",
     **kwargs: Any,
 ) -> DataFrame:
     """Read _SoTrender_ data files.
@@ -53,6 +54,8 @@ def read_data(
         Mapping from column names (inserted after the key column)
         to regex patterns for extracting values from file names.
         Value to assign should be returned by the first match group.
+    keycol
+        Name of the column to use to produce unique namespaced observation identifiers.
     """
     # ruff: noqa: C901
     metadata = metadata or {}
@@ -60,11 +63,7 @@ def read_data(
 
     def _iter():
         for source, df in DataFrame.read_many(*sources, **kwargs):
-            df = (
-                _normalize_columns(df)
-                .convert_dtypes()
-                .rename(columns={"fb_post_id": "key"})
-            )
+            df = _normalize_columns(df).convert_dtypes().rename(columns={keycol: "key"})
             for field, rx in reversed(metadata.items()):
                 df.insert(1, field, rx.match(str(source)).group(1))
             yield df
