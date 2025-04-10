@@ -42,6 +42,7 @@ def read_data(
     *sources: PathLike,
     metadata: Mapping[str, str | re.Pattern] | None = None,
     keycol: str = "fb_post_id",
+    drop_duplicates: bool = True,
     **kwargs: Any,
 ) -> DataFrame:
     """Read _SoTrender_ data files.
@@ -68,9 +69,9 @@ def read_data(
                 df.insert(1, field, rx.match(str(source)).group(1))
             yield df
 
-    data = pd.concat(_iter(), axis=0, ignore_index=True).drop_duplicates(
-        subset="key", ignore_index=True
-    )
+    data = pd.concat(_iter(), axis=0, ignore_index=True)
+    if drop_duplicates:
+        data.drop_duplicates(subset="key", ignore_index=True, inplace=True)
 
     def parse_date(s: str) -> date:
         return pd.NaT if pd.isnull(s) else date.fromisoformat(s)
@@ -99,7 +100,9 @@ def read_data(
         data.insert(pos, "timestamp", ts)
 
     prefix = "sotrender@"
-    data["key"] = prefix + data["key"].astype(str).str.removeprefix(prefix)
+    if not pd.api.types.is_string_dtype(data["key"]):
+        data["key"] = data["key"].astype(str)
+    data["key"] = prefix + data["key"].str.removeprefix(prefix)
 
     intcols = [
         "likes",
