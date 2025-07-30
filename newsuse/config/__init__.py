@@ -66,7 +66,7 @@ class Config(DictConfig):
     >>> config["frac"]
     0.5
 
-    Speciel ``defaults!`` key-directive can be used to define a section using
+    Special ``defaults!`` key-directive can be used to define a section using
     another section as a source of default values (it is flat copied).
 
     >>> config = Config({

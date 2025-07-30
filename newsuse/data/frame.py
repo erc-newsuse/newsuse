@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import io
 import warnings
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from functools import singledispatchmethod
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, overload
 
 import pandas as pd
 from pydrive2.drive import GoogleDrive
@@ -28,11 +30,11 @@ class Series(pd.Series):
     dtype_backend = "pyarrow"
 
     @property
-    def _constructor(self) -> type["Series"]:
+    def _constructor(self) -> type[Series]:
         return self.__class__
 
     @property
-    def _constructor_expanddim(self) -> type["DataFrame"]:
+    def _constructor_expanddim(self) -> type[DataFrame]:
         return DataFrame
 
     def convert_dtypes(
@@ -104,11 +106,11 @@ class DataFrame(pd.DataFrame):
     parquet_engine = "pyarrow"
 
     @property
-    def _constructor(self) -> type["DataFrame"]:
+    def _constructor(self) -> type[DataFrame]:
         return self.__class__
 
     @property
-    def _constructor_sliced(self) -> type["Series"]:
+    def _constructor_sliced(self) -> type[Series]:
         return Series
 
     @classmethod
@@ -498,8 +500,18 @@ class DataFrame(pd.DataFrame):
         """
         return cls.from_csv(*args, sep="\t", **kwargs)
 
+    @overload
     @classmethod
-    def from_json(cls, *args: Any, **kwargs: Any) -> Self:
+    def from_json(cls, *args: Any, chunksize: None, **kwargs: Any) -> Self:
+        ...
+
+    @overload
+    @classmethod
+    def from_json(cls, *args: Any, chunksize: int, **kwargs: Any) -> JsonReader:
+        ...
+
+    @classmethod
+    def from_json(cls, *args: Any, chunksize: int | None = None, **kwargs: Any):
         """See :func:`pandas.read_json`.
 
         Examples
@@ -513,11 +525,26 @@ class DataFrame(pd.DataFrame):
         >>> isinstance(df, DataFrame)
         True
         """
-        kwargs = cls._make_read_kwargs(**{"convert_dates": False, **kwargs})
-        return cls(pd.read_json(*args, **kwargs))
+        kwargs = cls._make_read_kwargs(
+            **{"convert_dates": False, "chunksize": chunksize, **kwargs}
+        )
+        output = pd.read_json(*args, **kwargs)
+        if isinstance(output, pd.DataFrame):
+            return cls(output)
+        return JsonReader._from_json_reader(output)
+
+    @overload
+    @classmethod
+    def from_jsonl(cls, *args: Any, chunksize: None, **kwargs: Any) -> Self:
+        ...
+
+    @overload
+    @classmethod
+    def from_jsonl(cls, *args: Any, chunksize: int, **kwargs: Any) -> JsonReader:
+        ...
 
     @classmethod
-    def from_jsonl(cls, *args: Any, **kwargs: Any) -> Self:
+    def from_jsonl(cls, *args: Any, chunksize: int | None = None, **kwargs: Any):
         """See :func:`pandas.read_json` with `lines=True`.
 
         Examples
@@ -528,8 +555,25 @@ class DataFrame(pd.DataFrame):
            a  b
         0  1  2
         1  2  3
+
+        This method supports also incremental reading in chunks
+        by passing `chunksize` argument.
+        >>> buff = io.StringIO('{"a": 1, "b": 2}\\n{"a": 2, "b": 3}')
+        >>> for chunk in DataFrame.from_jsonl(buff, chunksize=1):
+        ...     print(chunk)
+           a  b
+        0  1  2
+           a  b
+        1  2  3
+
+        And the returned chunks are :class:`newsuse.data.DataFrame` instances.
+        >>> all(
+        ...     isinstance(chunk, DataFrame)
+        ...     for chunk in DataFrame.from_jsonl(buff, chunksize=1)
+        ... )
+        True
         """
-        return cls.from_json(*args, lines=True, **kwargs)
+        return cls.from_json(*args, lines=True, chunksize=chunksize, **kwargs)
 
     @classmethod
     def from_parquet(cls, *args: Any, engine: str = parquet_engine, **kwargs: Any) -> Self:
@@ -713,3 +757,22 @@ class DataFrame(pd.DataFrame):
         return pd.concat(
             (df for _, df in cls.read_many(*sources, progress=progress)), **kwargs
         )
+
+
+class JsonReader(pd.io.json._json.JsonReader):
+    """Simple wrapper around :class:`pandas.io.json._json.JsonReader`
+    to allow for iterating over JSON lines.
+    """
+
+    @classmethod
+    def _from_json_reader(cls, reader: pd.io.json._json.JsonReader) -> Self:
+        new_reader = cls.__new__(cls)
+        new_reader.__dict__.update(reader.__dict__)
+        return new_reader
+
+    def read(self) -> DataFrame | Series:
+        obj: DataFrame | Series
+        obj = super().read()
+        if isinstance(obj, pd.DataFrame):
+            return DataFrame(obj)
+        return Series(obj)
